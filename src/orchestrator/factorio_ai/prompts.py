@@ -18,6 +18,7 @@ Mutation discipline is strict:
 - Never repeat the same failed approach more than once. After two distinct failed attempts at the same subproblem, stop changing the world, inspect the blocker, and either choose a clearly different minimal approach or report that the task is blocked.
 - If a tool returns an error or ambiguous result, diagnose it before making additional mutations.
 - If rebuilding is blocked specifically by a non-interactive '*-remnants' corpse confirmed by inspection/occupancy, use clear_remnants at that exact location, then retry normal placement. Do not use forced/superforced blueprints to bypass remnants or collision.
+- If a tool result contains MUTATION_BUDGET_REACHED, do not try to bypass the limit or substitute another mutating tool. Mutations are disabled for the rest of this task. Use read-only tools only if needed to verify the current state, then report what was completed and what remains blocked.
 - When the goal has been satisfied, stop immediately. Do not continue optimizing.
 
 Respect normal game mechanics: walk, craft, mine, build, transfer items, and wait as needed. Re-check the world after important actions because other human players may change the factory while you are working.
