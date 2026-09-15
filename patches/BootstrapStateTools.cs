@@ -5,9 +5,8 @@ using System.ComponentModel;
 namespace FactorioMCP.Tools;
 
 /// <summary>
-/// Read-only tools used to bootstrap an agent into an existing save.
-/// These intentionally summarize global state instead of relying only on
-/// FactorioMCP's building-memory file, which may have been created after the factory.
+/// Extra tools used by factorio-ai to bootstrap an agent into an existing save
+/// and to leave the selected player in a safe idle state when the orchestrator exits.
 /// </summary>
 [McpServerToolType]
 internal sealed class BootstrapStateTools(FactorioService factorio, GameCommandQueue queue)
@@ -59,6 +58,22 @@ internal sealed class BootstrapStateTools(FactorioService factorio, GameCommandQ
                 surfaces[#surfaces + 1] = '{"surface":"' .. esc(surface.name) .. '","counts":{' .. table.concat(countParts, ',') .. '}}'
             end
             rcon.print('{"surfaces":[' .. table.concat(surfaces, ',') .. ']}')
+            """, ct), cancellationToken);
+    }
+
+    [McpServerTool, Description(
+        "Immediately stop walking and active mining for the configured player and clear FactorioMCP's persisted movement/mining state. " +
+        "Safe to call repeatedly; intended as an emergency/cleanup stop.")]
+    public Task<string> EmergencyStop(CancellationToken cancellationToken = default)
+    {
+        return queue.ExecuteAsync(nameof(EmergencyStop), ct => factorio.ExecuteRawLuaAsync("""
+            local p = game.get_player(storage.factorio_mcp_player_name)
+            if not p then error("Configured Factorio player does not exist") end
+            storage.walk_dir = nil
+            storage.mine_state = nil
+            p.walking_state = {walking = false}
+            p.mining_state = {mining = false}
+            rcon.print('{"success":true,"status":"stopped"}')
             """, ct), cancellationToken);
     }
 }
