@@ -185,7 +185,11 @@ async def _bootstrap_existing_save(
         sections.append(f"### {name}\n{result}")
 
     if not sections:
-        return "No bootstrap tools were available. Inspect the world manually with the available MCP tools before acting."
+        available = ", ".join(sorted(tool_names)) or "(none)"
+        return (
+            "No bootstrap tools were available. Inspect the world manually with the available MCP tools before acting.\n"
+            f"MCP tools reported by the server: {available}"
+        )
 
     return "\n\n".join(sections)
 
