@@ -8,7 +8,7 @@ Building-memory tools such as find_buildings_by_type and get_buildings_near only
 
 Treat the user's requested scope as a hard boundary. If the user asks to fix only one subsystem, do not opportunistically rebuild, optimize, expand, or clean up anything else.
 
-For repair or mutation tasks, use a strict diagnosis-first phase. Until the exact blocker is established, use only read-only perception/query tools and, if the user has not forbidden movement, safe_walk_to_position when walking is needed to get within inspection range. During diagnosis do NOT craft, pick up ground items, mine, place, rotate, insert/remove items, create/revoke ghosts, place blueprints, change research, or otherwise modify the world or inventory. Once the cause is established, form a minimal concrete repair plan before the first mutation.
+For repair or mutation tasks, use a strict diagnosis-first phase. Until the exact blocker is established, use only read-only perception/query tools and, if the user has not forbidden movement, normal navigation tools when walking is needed to get within inspection range. During diagnosis do NOT craft, pick up ground items, mine, place, rotate, insert/remove items, create/revoke ghosts, place blueprints, change research, or otherwise modify the world or inventory. Once the cause is established, form a minimal concrete repair plan before the first mutation.
 
 Prefer repairing and reusing existing infrastructure over rebuilding it. Use the smallest number of changes that can satisfy the goal. Do not pre-craft speculative parts: craft only items required by the diagnosed plan. For newly placed assembling machines, use set_assembler_recipe to assign the intended recipe after placement; do not use a blueprint merely as a workaround for recipe assignment.
 
@@ -25,29 +25,18 @@ Mutation discipline is strict:
 - If a tool result contains MUTATION_BUDGET_REACHED, do not try to bypass the limit or substitute another mutating tool. Mutations are disabled for the rest of this task. Use read-only tools only if needed to verify the current state, then report what was completed and what remains blocked.
 - When the goal has been satisfied, stop immediately. Do not continue optimizing.
 
-Respect normal game mechanics: walk, craft, mine, build, transfer items, and wait as needed. Re-check the world after important actions because other human players may change the factory while you are working.
+Respect normal game mechanics: walk, craft, mine, build, transfer items, and wait as needed. Re-check the world after important actions because other human players may change the factory while you are working. Remember that standing on a transport belt can move the character even when walking input is idle; distinguish belt transport from an active-walking bug before diagnosing navigation.
 
 Do not deliberately interfere with other players' characters or belongings. You control only the configured Factorio player. If the configured player is unavailable or an action would require arbitrary raw Lua, stop and explain what is blocking progress instead of trying to bypass the tool boundary.
 """
 
 # ModelContextProtocol's .NET server exports C# method names as snake_case.
 # Keep both spellings here so a future SDK naming change cannot accidentally expose them.
-# The upstream movement helpers are hidden because they can leave walking active while
-# the cloud model is thinking; safe_walk_to_position wraps the same A* pathfinder and
-# force-stops movement before returning.
 DANGEROUS_TOOL_NAMES = {
     "execute_lua",
     "clear_building_memory",
-    "walk_to_position",
-    "move_to_entity",
-    "move_to_resource",
-    "move_to_building",
     "refuel_entity_multiple",
     "ExecuteLua",
     "ClearBuildingMemory",
-    "WalkToPosition",
-    "MoveToEntity",
-    "MoveToResource",
-    "MoveToBuilding",
     "RefuelEntityMultiple",
 }
