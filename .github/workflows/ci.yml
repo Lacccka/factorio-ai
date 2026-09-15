@@ -30,6 +30,13 @@ jobs:
       - name: Validate orchestrator CLI
         run: factorio-ai --help
 
+      - name: Validate offline bootstrap configuration
+        env:
+          FACTORIO_PLAYER_NAME: ci-player
+          FACTORIO_RCON_PASSWORD: ci-password
+          AI_PROVIDER: openai
+        run: python -c "from factorio_ai.app import Settings; s = Settings.from_env(require_cloud=False); assert s.player_name == 'ci-player' and s.api_key == ''"
+
       - name: Bootstrap and build patched FactorioMCP
         shell: pwsh
         run: ./scripts/bootstrap-factorio-mcp.ps1
