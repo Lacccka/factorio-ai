@@ -334,17 +334,27 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
             tools = [_tool_schema(tool) for tool in visible_tools]
             client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
 
-            if settings.provider == "openai":
-                final_text = await _run_openai_stateful(
-                    session, client, settings, goal, tools, bootstrap
-                )
-            else:
-                final_text = await _run_deepseek_stateless(
-                    session, client, settings, goal, tools, bootstrap
-                )
+            try:
+                if settings.provider == "openai":
+                    final_text = await _run_openai_stateful(
+                        session, client, settings, goal, tools, bootstrap
+                    )
+                else:
+                    final_text = await _run_deepseek_stateless(
+                        session, client, settings, goal, tools, bootstrap
+                    )
 
-            print(final_text)
-            return 0
+                print(final_text)
+                return 0
+            finally:
+                if "EmergencyStop" in tool_names:
+                    cleanup = await _call_tool(
+                        session,
+                        "EmergencyStop",
+                        {},
+                        settings.tool_result_max_chars,
+                    )
+                    print(f"[cleanup] EmergencyStop -> {cleanup[:300]}", file=sys.stderr)
 
 
 def _parse_args() -> argparse.Namespace:
