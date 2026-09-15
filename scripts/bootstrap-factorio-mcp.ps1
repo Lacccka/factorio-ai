@@ -8,6 +8,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Target = Join-Path $RepoRoot "src/FactorioMCP"
 $PlayerTargetPatch = Join-Path $RepoRoot "patches/FactorioPlayerTarget.cs"
 $BootstrapToolsPatch = Join-Path $RepoRoot "patches/BootstrapStateTools.cs"
+$FactoryPlanningToolsPatch = Join-Path $RepoRoot "patches/FactoryPlanningTools.cs"
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
     $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -56,6 +57,7 @@ if ($replacementCount -eq 0) {
 
 Copy-Item -Force $PlayerTargetPatch (Join-Path $Target "FactorioMCP/Services/FactorioPlayerTarget.cs")
 Copy-Item -Force $BootstrapToolsPatch (Join-Path $Target "FactorioMCP/Tools/BootstrapStateTools.cs")
+Copy-Item -Force $FactoryPlanningToolsPatch (Join-Path $Target "FactorioMCP/Tools/FactoryPlanningTools.cs")
 
 # Factorio 2.0 electric poles no longer expose LuaEntity.neighbours. The pinned
 # upstream topology tool still uses pole.neighbours.copper, which raises
@@ -212,6 +214,7 @@ if ($remaining) {
 }
 
 Write-Host "Patched $replacementCount player references."
+Write-Host "Installed structured factory-layout planning tool."
 Write-Host "Patched Factorio 2.0 power-topology wire traversal."
 Write-Host "Patched flow-graph fallback entity keys."
 Write-Host "Patched Factorio 2.0 entity prototype health query."
