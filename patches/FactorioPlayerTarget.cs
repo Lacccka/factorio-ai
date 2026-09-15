@@ -19,6 +19,15 @@ internal sealed class FactorioPlayerTarget(RconClient rcon)
                 "FACTORIO_PLAYER_NAME is required. Refusing to fall back to connected_players[1] in multiplayer.");
         }
 
+        // On a save where Lua console commands have never been used, Factorio 2.x
+        // rejects the first command with an achievement-warning and asks for the
+        // exact command to be repeated. Send the same harmless probe twice so the
+        // second invocation confirms that prompt. Once the save is already unlocked,
+        // both calls are harmless no-ops apart from an RCON response.
+        const string luaUnlockProbe = "rcon.print('{\"factorio_ai_lua_ready\":true}')";
+        await rcon.ExecuteLuaAsync(luaUnlockProbe, cancellationToken);
+        await rcon.ExecuteLuaAsync(luaUnlockProbe, cancellationToken);
+
         var escapedName = EscapeLuaString(playerName.Trim());
         var lua = $$"""
             storage.factorio_mcp_player_name = "{{escapedName}}"
