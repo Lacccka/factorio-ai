@@ -67,6 +67,22 @@ $program = $program.Replace(
     $programNeedle,
     "$programNeedle`r`n    .AddSingleton<FactorioPlayerTarget>()"
 )
+
+# MCP stdio requires stdout to contain JSON-RPC only. Route all .NET console logs to stderr.
+$builderNeedle = "var builder = Host.CreateApplicationBuilder(args);"
+if (-not $program.Contains($builderNeedle)) {
+    throw "Could not patch Program.cs logging: host builder initialization changed upstream."
+}
+$loggingPatch = @(
+    $builderNeedle,
+    "",
+    "builder.Logging.ClearProviders();",
+    "builder.Logging.AddConsole(options =>",
+    "{",
+    "    options.LogToStandardErrorThreshold = LogLevel.Trace;",
+    "});"
+) -join "`r`n"
+$program = $program.Replace($builderNeedle, $loggingPatch)
 Write-Utf8NoBom $programPath $program
 
 $rconServicePath = Join-Path $Target "FactorioMCP/Services/RconConnectionService.cs"
