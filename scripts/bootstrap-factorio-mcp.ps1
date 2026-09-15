@@ -63,15 +63,19 @@ Copy-Item -Force $BootstrapToolsPatch (Join-Path $Target "FactorioMCP/Tools/Boot
 # through LuaWireConnector instead (Factorio 2.0.72 API).
 $energyServicePath = Join-Path $Target "FactorioMCP/Services/EnergyService.cs"
 $energyService = [System.IO.File]::ReadAllText($energyServicePath).Replace("`r`n", "`n")
-$oldTopologyBlock = @'
+
+# Normalize the here-strings as well. On Windows with Git autocrlf they otherwise
+# contain CRLF while $energyService above has already been normalized to LF, making
+# an exact Contains/Replace fail even though the upstream block is unchanged.
+$oldTopologyBlock = (@'
                     local nb = {}
                     for _, n in pairs(pole.neighbours.copper) do
                         if n.electric_network_id == nid then
                             nb[#nb+1] = '{"name":"'..esc(n.name)..'","x":'..string.format("%.1f",n.position.x)..',"y":'..string.format("%.1f",n.position.y)..'}'
                         end
                     end
-'@
-$newTopologyBlock = @'
+'@).Replace("`r`n", "`n")
+$newTopologyBlock = (@'
                     local nb = {}
                     local connector = pole.get_wire_connector(defines.wire_connector_id.pole_copper, false)
                     if connector then
@@ -83,7 +87,7 @@ $newTopologyBlock = @'
                             end
                         end
                     end
-'@
+'@).Replace("`r`n", "`n")
 if (-not $energyService.Contains($oldTopologyBlock)) {
     throw "Could not patch EnergyService topology: upstream neighbour block changed."
 }
