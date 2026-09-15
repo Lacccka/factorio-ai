@@ -84,6 +84,8 @@ async function proxyResponses(request, env, requestId) {
     headers.set("Cache-Control", "no-store");
     headers.set("Content-Type", upstream.headers.get("Content-Type") || "application/json; charset=utf-8");
     headers.set("X-Factorio-AI-Request-Id", requestId);
+    const openaiRequestId = upstream.headers.get("x-request-id");
+    if (openaiRequestId) headers.set("X-OpenAI-Request-Id", openaiRequestId);
 
     return new Response(upstream.body, {
       status: upstream.status,
@@ -114,12 +116,22 @@ export default {
     const path = normalizePath(url.pathname);
 
     if (request.method === "GET" && path === "/health") {
+      const cf = request.cf || {};
       return json({
         ok: true,
         service: "factorio-ai-openai-proxy",
         endpoint: "/v1/responses",
         openai_key_configured: Boolean(env.OPENAI_API_KEY),
         shared_secret_configured: Boolean(env.WORKER_SHARED_SECRET),
+        edge: {
+          country: cf.country ?? null,
+          colo: cf.colo ?? null,
+          region: cf.region ?? null,
+          region_code: cf.regionCode ?? null,
+          timezone: cf.timezone ?? null,
+          placement: request.headers.get("cf-placement"),
+          ray: request.headers.get("cf-ray"),
+        },
         request_id: requestId,
       });
     }
