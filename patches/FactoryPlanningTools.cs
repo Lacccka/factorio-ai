@@ -36,14 +36,14 @@ internal sealed class FactoryPlanningTools(FactorioService factorio, GameCommand
             ? string.Create(CultureInfo.InvariantCulture, $"{{x={centerX.Value},y={centerY.Value}}}")
             : "p.position";
 
-        var lua = string.Create(CultureInfo.InvariantCulture, $$"""
+        var lua = string.Create(CultureInfo.InvariantCulture, $$$"""
             local function esc(s) return s:gsub('\\', '\\\\'):gsub('"', '\\"') end
             local p = game.get_player(storage.factorio_mcp_player_name)
             if not p then error("Configured Factorio player does not exist") end
             local surface = p.surface
-            local center = {{centerExpr}}
-            local radius = {{radius}}
-            local min_run = {{minRunLength}}
+            local center = {{{centerExpr}}}
+            local radius = {{{radius}}}
+            local min_run = {{{minRunLength}}}
 
             local dir_names = {}
             for k, v in pairs(defines.direction) do dir_names[v] = k end
