@@ -17,17 +17,18 @@ from openai import AsyncOpenAI
 from .prompts import DANGEROUS_TOOL_NAMES, SYSTEM_PROMPT
 
 
+# ModelContextProtocol's .NET server exports C# MCP method names as snake_case.
 BOOTSTRAP_CALLS: list[tuple[str, dict[str, Any]]] = [
-    ("GetPlayerPosition", {}),
-    ("GetInventory", {}),
-    ("GetResearchStatus", {}),
-    ("GetResearchedTechnologies", {}),
-    ("GetAvailableTechnologies", {}),
-    ("GetAvailableRecipes", {}),
-    ("GetExistingFactorySummary", {}),
-    ("GetBuildingSummary", {}),
-    ("GetElectricNetwork", {}),
-    ("GetNearbyEntities", {"radius": 40}),
+    ("get_player_position", {}),
+    ("get_inventory", {}),
+    ("get_research_status", {}),
+    ("get_researched_technologies", {}),
+    ("get_available_technologies", {}),
+    ("get_available_recipes", {}),
+    ("get_existing_factory_summary", {}),
+    ("get_building_summary", {}),
+    ("get_electric_network", {}),
+    ("get_nearby_entities", {"radius": 40}),
 ]
 
 
@@ -351,14 +352,14 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
                 print(final_text)
                 return 0
             finally:
-                if "EmergencyStop" in tool_names:
+                if "emergency_stop" in tool_names:
                     cleanup = await _call_tool(
                         session,
-                        "EmergencyStop",
+                        "emergency_stop",
                         {},
                         settings.tool_result_max_chars,
                     )
-                    print(f"[cleanup] EmergencyStop -> {cleanup[:300]}", file=sys.stderr)
+                    print(f"[cleanup] emergency_stop -> {cleanup[:300]}", file=sys.stderr)
 
 
 def _parse_args() -> argparse.Namespace:
