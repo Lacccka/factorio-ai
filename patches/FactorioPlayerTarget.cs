@@ -26,7 +26,10 @@ internal sealed class FactorioPlayerTarget(RconClient rcon)
             if not p then
                 error("Configured FACTORIO_PLAYER_NAME was not found: " .. storage.factorio_mcp_player_name)
             end
-            rcon.print('{"name":"' .. p.name .. '","connected":' .. tostring(p.connected) .. '}')
+            if not p.connected then
+                error("Configured FACTORIO_PLAYER_NAME is not currently connected: " .. storage.factorio_mcp_player_name)
+            end
+            rcon.print('{"name":"' .. p.name .. '","connected":true}')
             """;
 
         return await rcon.ExecuteLuaAsync(lua, cancellationToken);
