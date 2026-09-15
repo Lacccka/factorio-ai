@@ -74,10 +74,26 @@ MUTATING_TOOL_PREFIXES = (
 )
 MUTATING_TOOL_EXCLUSIONS = {
     "walk_to_position",
+    "safe_walk_to_position",
     "emergency_stop",
     "check_craft_feasibility",
     "ensure_item",
 }
+
+# Large world scans are useful, but carrying tens of thousands of characters from every
+# scan through a stateful Responses conversation causes context growth to explode. The
+# model can always narrow the radius and query again when the compact result is not enough.
+TOOL_RESULT_CAPS = {
+    "take_screenshot": 12_000,
+    "get_nearby_entities": 12_000,
+    "get_flow_graph": 12_000,
+    "get_power_network_topology": 12_000,
+    "find_idle_machines": 12_000,
+    "count_item_in_world": 12_000,
+    "get_area_occupancy": 12_000,
+    "inspect_entity_multiple": 12_000,
+}
+DEFAULT_TOOL_RESULT_CAP = 20_000
 
 
 @dataclass(frozen=True)
@@ -140,7 +156,7 @@ class Settings:
             max_turns=_positive_int("AGENT_MAX_TURNS", 80),
             max_mutations=_positive_int("AGENT_MAX_MUTATIONS", 80),
             max_failed_mutations=_positive_int("AGENT_MAX_FAILED_MUTATIONS", 8),
-            tool_result_max_chars=_positive_int("AGENT_TOOL_RESULT_MAX_CHARS", 50_000),
+            tool_result_max_chars=_positive_int("AGENT_TOOL_RESULT_MAX_CHARS", DEFAULT_TOOL_RESULT_CAP),
         )
 
 
@@ -186,6 +202,29 @@ def _mcp_env(settings: Settings) -> dict[str, str]:
     }
 
 
+def _compact_text(value: str, limit: int) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
+
+
+def _compact_schema(value: Any) -> Any:
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"title", "$schema"}:
+                continue
+            if key == "description" and isinstance(item, str):
+                compact[key] = _compact_text(item, 240)
+            else:
+                compact[key] = _compact_schema(item)
+        return compact
+    if isinstance(value, list):
+        return [_compact_schema(item) for item in value]
+    return value
+
+
 def _tool_schema(tool: Any) -> dict[str, Any]:
     schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
     if not isinstance(schema, dict):
@@ -193,8 +232,8 @@ def _tool_schema(tool: Any) -> dict[str, Any]:
     return {
         "type": "function",
         "name": tool.name,
-        "description": tool.description or "",
-        "parameters": schema,
+        "description": _compact_text(tool.description or "", 700),
+        "parameters": _compact_schema(schema),
     }
 
 
@@ -208,21 +247,38 @@ def _dump_model(value: Any) -> dict[str, Any]:
 
 def _tool_result_text(result: Any, max_chars: int) -> str:
     parts: list[str] = []
+    omitted_media = 0
     for item in getattr(result, "content", []) or []:
+        item_type = str(getattr(item, "type", "")).lower()
+        if item_type in {"image", "audio"}:
+            # Function-call outputs are textual in this orchestrator. Serializing MCP image
+            # blocks as JSON only feeds the model base64 noise while permanently inflating
+            # every later stateful turn. Vision tools also return a structured text legend.
+            omitted_media += 1
+            continue
+
         text = getattr(item, "text", None)
         if isinstance(text, str):
             parts.append(text)
         elif hasattr(item, "model_dump_json"):
-            parts.append(item.model_dump_json(exclude_none=True))
+            rendered = item.model_dump_json(exclude_none=True)
+            # Avoid accidentally carrying another opaque binary/data payload as text.
+            if len(rendered) > 4_000 and any(marker in rendered[:300].lower() for marker in ('"data"', '"blob"')):
+                omitted_media += 1
+            else:
+                parts.append(rendered)
         else:
             parts.append(str(item))
+
+    if omitted_media:
+        parts.append(f"[omitted {omitted_media} binary media block(s); structured text retained]")
 
     output = "\n".join(parts).strip() or "(tool returned no text content)"
     is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
     if is_error:
         output = "MCP_TOOL_ERROR:\n" + output
     if len(output) > max_chars:
-        output = output[:max_chars] + f"\n...[truncated at {max_chars} chars]"
+        output = output[:max_chars] + f"\n...[truncated at {max_chars} chars; narrow the query and retry if needed]"
     return output
 
 
@@ -325,7 +381,8 @@ async def _call_tool(
 ) -> str:
     try:
         result = await session.call_tool(name, arguments=arguments)
-        return _tool_result_text(result, max_chars)
+        effective_cap = min(max_chars, TOOL_RESULT_CAPS.get(name, DEFAULT_TOOL_RESULT_CAP))
+        return _tool_result_text(result, effective_cap)
     except Exception as exc:  # Tool failures are fed back to the model instead of killing the run.
         return f"MCP_TOOL_EXCEPTION: {type(exc).__name__}: {exc}"
 
