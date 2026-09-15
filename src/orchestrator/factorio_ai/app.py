@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,52 @@ BOOTSTRAP_CALLS: list[tuple[str, dict[str, Any]]] = [
 ]
 
 
+# Movement and read-only diagnostics are deliberately not budgeted. The guardrail is
+# for calls that can alter the world/inventory/research state. Prefix matching keeps it
+# effective when FactorioMCP adds related mutating tools without requiring a patch here.
+MUTATING_TOOL_NAMES = {
+    "craft",
+    "clear_remnants",
+}
+MUTATING_TOOL_PREFIXES = (
+    "place_",
+    "mine_",
+    "drop_",
+    "transfer_",
+    "insert_",
+    "remove_",
+    "pickup_",
+    "rotate_",
+    "revoke_",
+    "set_",
+    "connect_",
+    "disconnect_",
+    "research_",
+    "start_",
+    "cancel_",
+    "launch_",
+    "repair_",
+    "equip_",
+    "unequip_",
+    "shoot_",
+    "attack_",
+    "drive_",
+    "enter_",
+    "exit_",
+    "toggle_",
+    "enable_",
+    "disable_",
+    "order_",
+    "revive_",
+)
+MUTATING_TOOL_EXCLUSIONS = {
+    "walk_to_position",
+    "emergency_stop",
+    "check_craft_feasibility",
+    "ensure_item",
+}
+
+
 @dataclass(frozen=True)
 class Settings:
     provider: str
@@ -43,6 +90,8 @@ class Settings:
     api_key: str
     base_url: str
     max_turns: int
+    max_mutations: int
+    max_failed_mutations: int
     tool_result_max_chars: int
 
     @staticmethod
@@ -87,8 +136,24 @@ class Settings:
             api_key=api_key,
             base_url=base_url,
             max_turns=_positive_int("AGENT_MAX_TURNS", 80),
+            max_mutations=_positive_int("AGENT_MAX_MUTATIONS", 80),
+            max_failed_mutations=_positive_int("AGENT_MAX_FAILED_MUTATIONS", 8),
             tool_result_max_chars=_positive_int("AGENT_TOOL_RESULT_MAX_CHARS", 50_000),
         )
+
+
+@dataclass
+class RunMetrics:
+    started_at: float
+    cloud_turns: int = 0
+    tool_calls: int = 0
+    mutation_calls: int = 0
+    failed_mutations: int = 0
+    blocked_mutations: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    mutation_budget_exhausted: bool = False
 
 
 def _required(name: str) -> str:
@@ -159,6 +224,97 @@ def _tool_result_text(result: Any, max_chars: int) -> str:
     return output
 
 
+def _is_mutating_tool(name: str) -> bool:
+    if name in MUTATING_TOOL_EXCLUSIONS:
+        return False
+    if name in MUTATING_TOOL_NAMES:
+        return True
+    return any(name.startswith(prefix) for prefix in MUTATING_TOOL_PREFIXES)
+
+
+def _usage_int(usage: Any, name: str) -> int:
+    if usage is None:
+        return 0
+    if isinstance(usage, dict):
+        value = usage.get(name)
+    else:
+        value = getattr(usage, name, None)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_response_usage(response: Any, metrics: RunMetrics) -> None:
+    metrics.cloud_turns += 1
+    usage = getattr(response, "usage", None)
+    metrics.input_tokens += _usage_int(usage, "input_tokens")
+    metrics.output_tokens += _usage_int(usage, "output_tokens")
+    metrics.total_tokens += _usage_int(usage, "total_tokens")
+
+
+def _is_tool_failure(output: str) -> bool:
+    stripped = output.lstrip()
+    if stripped.startswith(("MCP_TOOL_ERROR:", "MCP_TOOL_EXCEPTION:", "INVALID_TOOL_ARGUMENTS:")):
+        return True
+    if "Cannot execute command. Error:" in stripped:
+        return True
+
+    try:
+        payload = json.loads(stripped)
+    except Exception:
+        return False
+
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("success") is False:
+        return True
+    if payload.get("error"):
+        return True
+    status = str(payload.get("status", "")).lower()
+    return status in {"error", "failed", "failure", "timeout", "stuck", "no_path"}
+
+
+def _budget_exhausted(settings: Settings, metrics: RunMetrics) -> bool:
+    return (
+        metrics.mutation_calls >= settings.max_mutations
+        or metrics.failed_mutations >= settings.max_failed_mutations
+    )
+
+
+def _budget_notice(settings: Settings, metrics: RunMetrics) -> str:
+    if metrics.failed_mutations >= settings.max_failed_mutations:
+        reason = (
+            f"failed mutation limit reached ({metrics.failed_mutations}/"
+            f"{settings.max_failed_mutations})"
+        )
+    else:
+        reason = f"mutation call limit reached ({metrics.mutation_calls}/{settings.max_mutations})"
+    return (
+        "MUTATION_BUDGET_REACHED: "
+        + reason
+        + ". Further mutating tools are disabled for this task. "
+        "Use read-only tools only if verification is still needed, then report the current state and blocker."
+    )
+
+
+def _print_metrics(metrics: RunMetrics) -> None:
+    elapsed = time.perf_counter() - metrics.started_at
+    print(
+        "[metrics] "
+        f"elapsed_s={elapsed:.1f} "
+        f"cloud_turns={metrics.cloud_turns} "
+        f"tool_calls={metrics.tool_calls} "
+        f"mutation_calls={metrics.mutation_calls} "
+        f"failed_mutations={metrics.failed_mutations} "
+        f"blocked_mutations={metrics.blocked_mutations} "
+        f"input_tokens={metrics.input_tokens} "
+        f"output_tokens={metrics.output_tokens} "
+        f"total_tokens={metrics.total_tokens}",
+        file=sys.stderr,
+    )
+
+
 async def _call_tool(
     session: ClientSession,
     name: str,
@@ -197,23 +353,51 @@ async def _bootstrap_existing_save(
 async def _execute_function_calls(
     session: ClientSession,
     response: Any,
-    max_chars: int,
+    settings: Settings,
+    metrics: RunMetrics,
 ) -> list[dict[str, Any]]:
     outputs: list[dict[str, Any]] = []
     for item in response.output:
         if getattr(item, "type", None) != "function_call":
             continue
 
-        try:
-            arguments = json.loads(item.arguments or "{}")
-            if not isinstance(arguments, dict):
-                raise ValueError("function arguments must decode to a JSON object")
-        except Exception as exc:
-            tool_output = f"INVALID_TOOL_ARGUMENTS: {exc}; raw={item.arguments!r}"
+        metrics.tool_calls += 1
+        mutating = _is_mutating_tool(item.name)
+
+        if mutating and metrics.mutation_budget_exhausted:
+            metrics.blocked_mutations += 1
+            tool_output = _budget_notice(settings, metrics)
+            print(f"[tool-blocked] {item.name} -> {tool_output}", file=sys.stderr)
         else:
-            print(f"[tool] {item.name} {json.dumps(arguments, ensure_ascii=False)}", file=sys.stderr)
-            tool_output = await _call_tool(session, item.name, arguments, max_chars)
-            print(f"[tool] {item.name} -> {tool_output[:300]}", file=sys.stderr)
+            try:
+                arguments = json.loads(item.arguments or "{}")
+                if not isinstance(arguments, dict):
+                    raise ValueError("function arguments must decode to a JSON object")
+            except Exception as exc:
+                tool_output = f"INVALID_TOOL_ARGUMENTS: {exc}; raw={item.arguments!r}"
+                if mutating:
+                    metrics.failed_mutations += 1
+            else:
+                if mutating:
+                    metrics.mutation_calls += 1
+
+                print(f"[tool] {item.name} {json.dumps(arguments, ensure_ascii=False)}", file=sys.stderr)
+                tool_output = await _call_tool(
+                    session,
+                    item.name,
+                    arguments,
+                    settings.tool_result_max_chars,
+                )
+                print(f"[tool] {item.name} -> {tool_output[:300]}", file=sys.stderr)
+
+                if mutating and _is_tool_failure(tool_output):
+                    metrics.failed_mutations += 1
+
+            if mutating and _budget_exhausted(settings, metrics):
+                metrics.mutation_budget_exhausted = True
+                notice = _budget_notice(settings, metrics)
+                tool_output = tool_output + "\n\n" + notice
+                print(f"[budget] {notice}", file=sys.stderr)
 
         outputs.append(
             {
@@ -231,7 +415,9 @@ async def _run_openai_stateful(
     settings: Settings,
     goal: str,
     tools: list[dict[str, Any]],
+    read_only_tools: list[dict[str, Any]],
     bootstrap: str,
+    metrics: RunMetrics,
 ) -> str:
     initial_input = f"USER GOAL:\n{goal}\n\nEXISTING SAVE BOOTSTRAP:\n{bootstrap}"
     response = await client.responses.create(
@@ -240,19 +426,22 @@ async def _run_openai_stateful(
         input=initial_input,
         tools=tools,
     )
+    _record_response_usage(response, metrics)
 
     for _ in range(settings.max_turns):
-        outputs = await _execute_function_calls(session, response, settings.tool_result_max_chars)
+        outputs = await _execute_function_calls(session, response, settings, metrics)
         if not outputs:
             return response.output_text or "(model completed without text output)"
 
+        active_tools = read_only_tools if metrics.mutation_budget_exhausted else tools
         response = await client.responses.create(
             model=settings.model,
             instructions=SYSTEM_PROMPT,
             previous_response_id=response.id,
             input=outputs,
-            tools=tools,
+            tools=active_tools,
         )
+        _record_response_usage(response, metrics)
 
     raise RuntimeError(f"Agent exceeded AGENT_MAX_TURNS={settings.max_turns}.")
 
@@ -263,7 +452,9 @@ async def _run_deepseek_stateless(
     settings: Settings,
     goal: str,
     tools: list[dict[str, Any]],
+    read_only_tools: list[dict[str, Any]],
     bootstrap: str,
+    metrics: RunMetrics,
 ) -> str:
     history: list[dict[str, Any]] = [
         {
@@ -273,14 +464,16 @@ async def _run_deepseek_stateless(
     ]
 
     for _ in range(settings.max_turns):
+        active_tools = read_only_tools if metrics.mutation_budget_exhausted else tools
         response = await client.responses.create(
             model=settings.model,
             instructions=SYSTEM_PROMPT,
             input=history,
-            tools=tools,
+            tools=active_tools,
         )
+        _record_response_usage(response, metrics)
 
-        outputs = await _execute_function_calls(session, response, settings.tool_result_max_chars)
+        outputs = await _execute_function_calls(session, response, settings, metrics)
         if not outputs:
             return response.output_text or "(model completed without text output)"
 
@@ -336,21 +529,45 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
                 return 0
 
             tools = [_tool_schema(tool) for tool in visible_tools]
+            read_only_tools = [
+                tool for tool in tools if not _is_mutating_tool(str(tool.get("name", "")))
+            ]
             client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
+            metrics = RunMetrics(started_at=time.perf_counter())
 
             print(
                 f"[cloud] provider={settings.provider} model={settings.model} base_url={settings.base_url}",
+                file=sys.stderr,
+            )
+            print(
+                f"[limits] max_turns={settings.max_turns} "
+                f"max_mutations={settings.max_mutations} "
+                f"max_failed_mutations={settings.max_failed_mutations}",
                 file=sys.stderr,
             )
 
             try:
                 if settings.provider == "openai":
                     final_text = await _run_openai_stateful(
-                        session, client, settings, goal, tools, bootstrap
+                        session,
+                        client,
+                        settings,
+                        goal,
+                        tools,
+                        read_only_tools,
+                        bootstrap,
+                        metrics,
                     )
                 else:
                     final_text = await _run_deepseek_stateless(
-                        session, client, settings, goal, tools, bootstrap
+                        session,
+                        client,
+                        settings,
+                        goal,
+                        tools,
+                        read_only_tools,
+                        bootstrap,
+                        metrics,
                     )
 
                 print(final_text)
@@ -364,6 +581,7 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
                         settings.tool_result_max_chars,
                     )
                     print(f"[cleanup] emergency_stop -> {cleanup[:300]}", file=sys.stderr)
+                _print_metrics(metrics)
 
 
 def _parse_args() -> argparse.Namespace:
