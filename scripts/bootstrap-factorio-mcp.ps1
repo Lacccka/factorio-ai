@@ -6,7 +6,8 @@ $UpstreamCommit = "f2fca61707efe3107e7a3738bb83d1505b0126f7"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Target = Join-Path $RepoRoot "src/FactorioMCP"
-$PatchFile = Join-Path $RepoRoot "patches/FactorioPlayerTarget.cs"
+$PlayerTargetPatch = Join-Path $RepoRoot "patches/FactorioPlayerTarget.cs"
+$BootstrapToolsPatch = Join-Path $RepoRoot "patches/BootstrapStateTools.cs"
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
     $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -53,7 +54,8 @@ if ($replacementCount -eq 0) {
     throw "Upstream no longer contains '$needle'. Review the patch before changing the pinned commit."
 }
 
-Copy-Item -Force $PatchFile (Join-Path $Target "FactorioMCP/Services/FactorioPlayerTarget.cs")
+Copy-Item -Force $PlayerTargetPatch (Join-Path $Target "FactorioMCP/Services/FactorioPlayerTarget.cs")
+Copy-Item -Force $BootstrapToolsPatch (Join-Path $Target "FactorioMCP/Tools/BootstrapStateTools.cs")
 
 $programPath = Join-Path $Target "FactorioMCP/Program.cs"
 $program = [System.IO.File]::ReadAllText($programPath)
