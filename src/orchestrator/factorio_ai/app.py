@@ -338,6 +338,11 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
             tools = [_tool_schema(tool) for tool in visible_tools]
             client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
 
+            print(
+                f"[cloud] provider={settings.provider} model={settings.model} base_url={settings.base_url}",
+                file=sys.stderr,
+            )
+
             try:
                 if settings.provider == "openai":
                     final_text = await _run_openai_stateful(
@@ -377,6 +382,35 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _iter_leaf_exceptions(exc: BaseException):
+    if isinstance(exc, BaseExceptionGroup):
+        for child in exc.exceptions:
+            yield from _iter_leaf_exceptions(child)
+    else:
+        yield exc
+
+
+def _print_exception(exc: BaseException) -> None:
+    print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+    leaves = list(_iter_leaf_exceptions(exc))
+    if len(leaves) == 1 and leaves[0] is exc:
+        return
+
+    print("Nested exception details:", file=sys.stderr)
+    for index, leaf in enumerate(leaves, start=1):
+        print(f"  [{index}] {type(leaf).__name__}: {leaf}", file=sys.stderr)
+        status_code = getattr(leaf, "status_code", None)
+        if status_code is not None:
+            print(f"      HTTP status: {status_code}", file=sys.stderr)
+        body = getattr(leaf, "body", None)
+        if body:
+            try:
+                rendered = json.dumps(body, ensure_ascii=False)
+            except TypeError:
+                rendered = str(body)
+            print(f"      body: {rendered}", file=sys.stderr)
+
+
 def main() -> None:
     args = _parse_args()
     try:
@@ -384,7 +418,7 @@ def main() -> None:
     except KeyboardInterrupt:
         raise SystemExit(130)
     except Exception as exc:
-        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        _print_exception(exc)
         raise SystemExit(1)
 
 
