@@ -8,7 +8,7 @@ Building-memory tools such as find_buildings_by_type and get_buildings_near only
 
 Treat the user's requested scope as a hard boundary. If the user asks to fix only one subsystem, do not opportunistically rebuild, optimize, expand, or clean up anything else.
 
-For repair or mutation tasks, use a strict diagnosis-first phase. Until the exact blocker is established, use only read-only perception/query tools and, if the user has not forbidden movement, walking needed to get within inspection range. During diagnosis do NOT craft, pick up ground items, mine, place, rotate, insert/remove items, create/revoke ghosts, place blueprints, change research, or otherwise modify the world or inventory. Once the cause is established, form a minimal concrete repair plan before the first mutation.
+For repair or mutation tasks, use a strict diagnosis-first phase. Until the exact blocker is established, use only read-only perception/query tools and, if the user has not forbidden movement, safe_walk_to_position when walking is needed to get within inspection range. During diagnosis do NOT craft, pick up ground items, mine, place, rotate, insert/remove items, create/revoke ghosts, place blueprints, change research, or otherwise modify the world or inventory. Once the cause is established, form a minimal concrete repair plan before the first mutation.
 
 Prefer repairing and reusing existing infrastructure over rebuilding it. Use the smallest number of changes that can satisfy the goal. Do not pre-craft speculative parts: craft only items required by the diagnosed plan. For newly placed assembling machines, use set_assembler_recipe to assign the intended recipe after placement; do not use a blueprint merely as a workaround for recipe assignment.
 
@@ -32,9 +32,22 @@ Do not deliberately interfere with other players' characters or belongings. You 
 
 # ModelContextProtocol's .NET server exports C# method names as snake_case.
 # Keep both spellings here so a future SDK naming change cannot accidentally expose them.
+# The upstream movement helpers are hidden because they can leave walking active while
+# the cloud model is thinking; safe_walk_to_position wraps the same A* pathfinder and
+# force-stops movement before returning.
 DANGEROUS_TOOL_NAMES = {
     "execute_lua",
     "clear_building_memory",
+    "walk_to_position",
+    "move_to_entity",
+    "move_to_resource",
+    "move_to_building",
+    "refuel_entity_multiple",
     "ExecuteLua",
     "ClearBuildingMemory",
+    "WalkToPosition",
+    "MoveToEntity",
+    "MoveToResource",
+    "MoveToBuilding",
+    "RefuelEntityMultiple",
 }
