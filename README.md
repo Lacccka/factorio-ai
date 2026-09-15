@@ -6,9 +6,11 @@ The project uses [FactorioMCP](https://github.com/sbarisic/FactorioMCP) as the g
 
 - deterministic targeting of one Factorio player by `FACTORIO_PLAYER_NAME` instead of `game.connected_players[1]`;
 - a cloud-only orchestrator (no local LLM);
-- OpenAI through a user-owned Cloudflare Worker;
+- OpenAI Responses API either directly or through a user-owned Cloudflare Worker;
 - DeepSeek directly through its API;
 - a startup prompt that assumes the save may already contain research, machines, logistics and other player-built infrastructure;
+- hard mutation/failure budgets to stop tool thrashing;
+- per-run tool/token/timing metrics;
 - dangerous raw Lua hidden from the cloud model by default.
 
 ## Architecture
@@ -26,6 +28,8 @@ Python orchestrator
    |             |
    |             +--> DeepSeek API directly
    |
+   +--> OpenAI Responses API directly
+   |
    +--> Cloudflare Worker --> OpenAI Responses API
 ```
 
@@ -33,7 +37,7 @@ There is no local inference. The Python process only orchestrates cloud model ca
 
 ## Current status
 
-This branch bootstraps the first vertical slice. The repository intentionally pins an upstream FactorioMCP commit and applies a small multiplayer-safety patch during setup instead of permanently copying the whole upstream tree. That keeps future upstream updates reviewable.
+This branch bootstraps the first vertical slice. The repository intentionally pins an upstream FactorioMCP commit and applies a small multiplayer-safety/compatibility patch during setup instead of permanently copying the whole upstream tree. That keeps future upstream updates reviewable.
 
 ## Prerequisites
 
@@ -43,7 +47,8 @@ This branch bootstraps the first vertical slice. The repository intentionally pi
 - Python 3.11+
 - Factorio 2.x with local RCON enabled
 - either:
-  - OpenAI API access behind your Cloudflare Worker, or
+  - direct OpenAI API access;
+  - OpenAI API access behind your Cloudflare Worker; or
   - a DeepSeek API key
 
 ## 1. Configure Factorio
@@ -60,7 +65,7 @@ From PowerShell in the repository root:
 ./scripts/bootstrap-factorio-mcp.ps1
 ```
 
-The script clones the pinned upstream FactorioMCP revision into `src/FactorioMCP`, patches multiplayer player selection, and builds it.
+The script clones the pinned upstream FactorioMCP revision into `src/FactorioMCP`, patches multiplayer player selection, applies Factorio 2.0 compatibility/safety tools, and builds it.
 
 ## 3. Configure environment
 
@@ -79,16 +84,25 @@ FACTORIO_RCON_PASSWORD=your-rcon-password
 
 Then choose one cloud provider.
 
+### OpenAI directly
+
+```dotenv
+AI_PROVIDER=openai
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=your-real-openai-api-key
+OPENAI_MODEL=gpt-5.6-terra
+```
+
 ### OpenAI through Cloudflare Worker
 
 ```dotenv
 AI_PROVIDER=openai
 OPENAI_BASE_URL=https://your-worker.workers.dev/v1
 OPENAI_API_KEY=your-worker-shared-secret
-OPENAI_MODEL=gpt-5.6
+OPENAI_MODEL=gpt-5.6-terra
 ```
 
-The value stored on the gaming PC is the Worker shared secret, not the real OpenAI key. The real OpenAI key stays in Cloudflare.
+When using the Worker, the value stored on the gaming PC is the Worker shared secret, not the real OpenAI key. The real OpenAI key stays in Cloudflare.
 
 ### DeepSeek directly
 
@@ -100,6 +114,19 @@ DEEPSEEK_MODEL=deepseek-flash
 ```
 
 DeepSeek does not pass through the Worker.
+
+### Agent guardrails
+
+```dotenv
+AGENT_MAX_TURNS=80
+AGENT_MAX_MUTATIONS=80
+AGENT_MAX_FAILED_MUTATIONS=8
+AGENT_TOOL_RESULT_MAX_CHARS=50000
+```
+
+`AGENT_MAX_MUTATIONS` is a hard cap on calls that modify the world, inventory, or research state. Read-only inspection and ordinary walking do not consume it. `AGENT_MAX_FAILED_MUTATIONS` stops further mutations early when repeated build/mine/transfer attempts fail. Once either mutation budget is exhausted, the orchestrator exposes only read-only tools for the rest of the task so the model can verify state and report the blocker instead of thrashing.
+
+At the end of a cloud run the CLI prints metrics including elapsed time, model turns, tool calls, mutation calls, failed mutations, and API token usage when the provider returns usage data.
 
 ## 4. Install the orchestrator
 
@@ -115,7 +142,7 @@ pip install -e ./src/orchestrator
 factorio-ai "Inspect the existing factory, then increase green-circuit production without rebuilding systems that already work."
 ```
 
-On startup the agent is instructed to inspect the existing save first: player state, nearby entities, research state, unlocked recipes, tracked buildings and power state. It must not assume a fresh game.
+On startup the agent inspects a compact existing-save snapshot and can query further state on demand. It must not assume a fresh game. Mutation tasks are diagnosis-first: the system prompt instructs the model to establish the relevant state/plan before crafting, mining, placing, or transferring items.
 
 ## Cloudflare Worker
 
