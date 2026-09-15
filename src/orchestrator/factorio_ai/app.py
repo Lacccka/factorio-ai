@@ -17,18 +17,17 @@ from openai import AsyncOpenAI
 from .prompts import DANGEROUS_TOOL_NAMES, SYSTEM_PROMPT
 
 
-# ModelContextProtocol's .NET server exports C# MCP method names as snake_case.
+# Keep startup context compact. Large raw recipe/entity dumps are expensive and can
+# distract the model from the user's actual goal; it can query those details on demand.
 BOOTSTRAP_CALLS: list[tuple[str, dict[str, Any]]] = [
     ("get_player_position", {}),
-    ("get_inventory", {}),
+    ("get_inventory_summary", {}),
     ("get_research_status", {}),
     ("get_researched_technologies", {}),
     ("get_available_technologies", {}),
-    ("get_available_recipes", {}),
     ("get_existing_factory_summary", {}),
-    ("get_building_summary", {}),
     ("get_electric_network", {}),
-    ("get_nearby_entities", {"radius": 40}),
+    ("summarize_area", {"radius": 50}),
 ]
 
 
