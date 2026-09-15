@@ -10,10 +10,7 @@ namespace FactorioMCP.Tools;
 /// and to leave the selected player in a safe idle state when the orchestrator exits.
 /// </summary>
 [McpServerToolType]
-internal sealed class BootstrapStateTools(
-    FactorioService factorio,
-    PathfindingService pathfinding,
-    GameCommandQueue queue)
+internal sealed class BootstrapStateTools(FactorioService factorio, GameCommandQueue queue)
 {
     [McpServerTool, Description(
         "List every technology already researched by the configured player's force. " +
@@ -63,49 +60,6 @@ internal sealed class BootstrapStateTools(
             end
             rcon.print('{"surfaces":[' .. table.concat(surfaces, ',') .. ']}')
             """, ct), cancellationToken);
-    }
-
-    [McpServerTool, Description(
-        "Walk to an exact position with Factorio A* pathfinding, then immediately force walking state idle before returning. " +
-        "Use this instead of the upstream walk/move tools; it prevents persistent walking while the cloud model is thinking.")]
-    public Task<string> SafeWalkToPosition(
-        double targetX,
-        double targetY,
-        double tolerance = 2.0,
-        double timeoutSeconds = 30,
-        CancellationToken cancellationToken = default)
-    {
-        if (tolerance <= 0)
-            throw new ArgumentOutOfRangeException(nameof(tolerance), "tolerance must be positive.");
-        if (timeoutSeconds <= 0)
-            throw new ArgumentOutOfRangeException(nameof(timeoutSeconds), "timeoutSeconds must be positive.");
-
-        return queue.ExecuteAsync(nameof(SafeWalkToPosition), async ct =>
-        {
-            string? result = null;
-            try
-            {
-                result = await pathfinding.WalkToAsync(targetX, targetY, tolerance, timeoutSeconds, ct);
-                return result;
-            }
-            finally
-            {
-                try
-                {
-                    await factorio.ExecuteRawLuaAsync("""
-                        local p = game.get_player(storage.factorio_mcp_player_name)
-                        storage.walk_dir = nil
-                        if p then p.walking_state = {walking = false} end
-                        rcon.print('ok')
-                        """, CancellationToken.None);
-                }
-                catch
-                {
-                    // Preserve the navigation result/error. The orchestrator also performs
-                    // EmergencyStop during final cleanup as a second safety layer.
-                }
-            }
-        }, cancellationToken);
     }
 
     [McpServerTool, Description(
