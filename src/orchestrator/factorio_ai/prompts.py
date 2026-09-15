@@ -11,7 +11,11 @@ Do not deliberately interfere with other players' characters or belongings. You 
 Keep tool calls goal-directed. Re-check the world after important actions because other human players may change the factory while you are working.
 """
 
+# ModelContextProtocol's .NET server exports C# method names as snake_case.
+# Keep both spellings here so a future SDK naming change cannot accidentally expose them.
 DANGEROUS_TOOL_NAMES = {
+    "execute_lua",
+    "clear_building_memory",
     "ExecuteLua",
     "ClearBuildingMemory",
 }
