@@ -69,6 +69,15 @@ $program = $program.Replace(
 )
 
 # MCP stdio requires stdout to contain JSON-RPC only. Route all .NET console logs to stderr.
+$loggingUsing = "using Microsoft.Extensions.Logging;"
+if (-not $program.Contains($loggingUsing)) {
+    $hostUsing = "using Microsoft.Extensions.Hosting;"
+    if (-not $program.Contains($hostUsing)) {
+        throw "Could not patch Program.cs logging imports: hosting using changed upstream."
+    }
+    $program = $program.Replace($hostUsing, "$hostUsing`r`n$loggingUsing")
+}
+
 $builderNeedle = "var builder = Host.CreateApplicationBuilder(args);"
 if (-not $program.Contains($builderNeedle)) {
     throw "Could not patch Program.cs logging: host builder initialization changed upstream."
