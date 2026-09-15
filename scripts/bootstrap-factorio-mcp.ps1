@@ -97,6 +97,42 @@ if ($energyService.Contains("pole.neighbours.copper")) {
 }
 Write-Utf8NoBom $energyServicePath $energyService
 
+# Some Factorio entities (notably certain belt-like entities) do not have a
+# unit_number. The pinned flow graph concatenates unit_number unconditionally,
+# which crashes with "attempt to concatenate field 'unit_number' (a nil value)".
+# Fall back to a stable name+position key when no unit number is available.
+$flowServicePath = Join-Path $Target "FactorioMCP/Services/FlowService.cs"
+$flowService = [System.IO.File]::ReadAllText($flowServicePath)
+$oldFlowKey = '                local key = from_e.unit_number..":"..to_e.unit_number'
+$newFlowKey = @'
+                local from_key = from_e.unit_number and tostring(from_e.unit_number) or (from_e.name..":"..string.format("%.3f", from_e.position.x)..":"..string.format("%.3f", from_e.position.y))
+                local to_key = to_e.unit_number and tostring(to_e.unit_number) or (to_e.name..":"..string.format("%.3f", to_e.position.x)..":"..string.format("%.3f", to_e.position.y))
+                local key = from_key..":"..to_key..":"..kind
+'@
+$newFlowKey = $newFlowKey.TrimEnd("`r", "`n")
+if (-not $flowService.Contains($oldFlowKey)) {
+    throw "Could not patch FlowService entity key: upstream flow key changed."
+}
+$flowService = $flowService.Replace($oldFlowKey, $newFlowKey)
+if ($flowService.Contains('from_e.unit_number..":"..to_e.unit_number')) {
+    throw "FlowService patch incomplete: unsafe unit_number concatenation remains."
+}
+Write-Utf8NoBom $flowServicePath $flowService
+
+# LuaEntityPrototype.max_health became get_max_health() in Factorio 2.0 runtime API.
+# The old property access makes get_entity_prototype fail before layout planning.
+$worldServicePath = Join-Path $Target "FactorioMCP/Services/FactorioService.World.cs"
+$worldService = [System.IO.File]::ReadAllText($worldServicePath)
+$oldPrototypeHealth = "(proto.max_health or 0)"
+if (-not $worldService.Contains($oldPrototypeHealth)) {
+    throw "Could not patch entity prototype max health: upstream prototype query changed."
+}
+$worldService = $worldService.Replace($oldPrototypeHealth, "proto.get_max_health()")
+if ($worldService.Contains("proto.max_health")) {
+    throw "Entity prototype patch incomplete: proto.max_health remains."
+}
+Write-Utf8NoBom $worldServicePath $worldService
+
 $programPath = Join-Path $Target "FactorioMCP/Program.cs"
 $program = [System.IO.File]::ReadAllText($programPath)
 $programNeedle = "    .AddSingleton<FactorioService>()"
@@ -177,6 +213,8 @@ if ($remaining) {
 
 Write-Host "Patched $replacementCount player references."
 Write-Host "Patched Factorio 2.0 power-topology wire traversal."
+Write-Host "Patched flow-graph fallback entity keys."
+Write-Host "Patched Factorio 2.0 entity prototype health query."
 Write-Host "Building FactorioMCP..."
 dotnet build (Join-Path $Target "FactorioMCP.sln")
 if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
