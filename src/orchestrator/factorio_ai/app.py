@@ -57,6 +57,8 @@ MUTATING_TOOL_PREFIXES = (
     "cancel_",
     "launch_",
     "repair_",
+    "refuel_",
+    "execute_",
     "equip_",
     "unequip_",
     "shoot_",
