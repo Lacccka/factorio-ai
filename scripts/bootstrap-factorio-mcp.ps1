@@ -90,14 +90,14 @@ if (-not $rconService.Contains($methodNeedle)) {
 $methodReplacement = @(
     "    private async Task InitializeGameListenersAsync(CancellationToken cancellationToken)",
     "    {",
-    "        var playerName = configuration[\"FACTORIO_PLAYER_NAME\"];",
+    '        var playerName = configuration["FACTORIO_PLAYER_NAME"];',
     "        if (string.IsNullOrWhiteSpace(playerName))",
     "        {",
-    "            throw new InvalidOperationException(\"FACTORIO_PLAYER_NAME is required for multiplayer-safe targeting.\");",
+    '            throw new InvalidOperationException("FACTORIO_PLAYER_NAME is required for multiplayer-safe targeting.");',
     "        }",
     "",
     "        await playerTarget.InitializeAsync(playerName, cancellationToken);",
-    "        logger.LogInformation(\"FactorioMCP target player initialized: {PlayerName}\", playerName);",
+    '        logger.LogInformation("FactorioMCP target player initialized: {PlayerName}", playerName);',
     "",
     "        try"
 ) -join $lineBreak
