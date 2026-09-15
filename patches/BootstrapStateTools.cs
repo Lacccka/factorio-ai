@@ -1,6 +1,7 @@
 using FactorioMCP.Services;
 using ModelContextProtocol.Server;
 using System.ComponentModel;
+using System.Globalization;
 
 namespace FactorioMCP.Tools;
 
@@ -59,6 +60,64 @@ internal sealed class BootstrapStateTools(FactorioService factorio, GameCommandQ
             end
             rcon.print('{"surfaces":[' .. table.concat(surfaces, ',') .. ']}')
             """, ct), cancellationToken);
+    }
+
+    [McpServerTool, Description(
+        "Remove only non-interactive Factorio '*-remnants' corpse entities near an exact position when they block rebuilding destroyed infrastructure. " +
+        "Use only after inspection or occupancy confirms remnants are the blocker. This never mines or removes live buildings, resources, ghosts, or items.")]
+    public Task<string> ClearRemnants(
+        double x,
+        double y,
+        double radius = 1.5,
+        CancellationToken cancellationToken = default)
+    {
+        if (radius <= 0 || radius > 3)
+        {
+            throw new ArgumentOutOfRangeException(nameof(radius), "radius must be > 0 and <= 3 tiles.");
+        }
+
+        var lua = string.Create(CultureInfo.InvariantCulture, $$"""
+            local function esc(s) return s:gsub('\\', '\\\\'):gsub('"', '\\"') end
+            local p = game.get_player(storage.factorio_mcp_player_name)
+            if not p then error("Configured Factorio player does not exist") end
+
+            local target = {x={{x}}, y={{y}}}
+            local center_dx = target.x - p.position.x
+            local center_dy = target.y - p.position.y
+            local center_distance = math.sqrt(center_dx * center_dx + center_dy * center_dy)
+            if center_distance > p.reach_distance + {{radius}} then
+                rcon.print('{"success":false,"error":"out_of_range","distance":' .. string.format("%.1f", center_distance) .. ',"limit":' .. p.reach_distance .. '}')
+                return
+            end
+
+            local removed = {}
+            local corpses = p.surface.find_entities_filtered{
+                position=target,
+                radius={{radius}},
+                type='corpse'
+            }
+
+            for _, entity in ipairs(corpses) do
+                if entity.valid and string.sub(entity.name, -9) == '-remnants' then
+                    local dx = entity.position.x - p.position.x
+                    local dy = entity.position.y - p.position.y
+                    local distance = math.sqrt(dx * dx + dy * dy)
+                    if distance <= p.reach_distance then
+                        local name = entity.name
+                        local ex = entity.position.x
+                        local ey = entity.position.y
+                        local destroyed = entity.destroy()
+                        if destroyed ~= false then
+                            removed[#removed + 1] = '{"name":"' .. esc(name) .. '","x":' .. ex .. ',"y":' .. ey .. '}'
+                        end
+                    end
+                end
+            end
+
+            rcon.print('{"success":true,"removed_count":' .. #removed .. ',"removed":[' .. table.concat(removed, ',') .. ']}')
+            """);
+
+        return queue.ExecuteAsync(nameof(ClearRemnants), ct => factorio.ExecuteRawLuaAsync(lua, ct), cancellationToken);
     }
 
     [McpServerTool, Description(
