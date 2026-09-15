@@ -46,7 +46,7 @@ class Settings:
     tool_result_max_chars: int
 
     @staticmethod
-    def from_env() -> "Settings":
+    def from_env(require_cloud: bool = True) -> "Settings":
         provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
         if provider not in {"openai", "deepseek"}:
             raise ValueError("AI_PROVIDER must be 'openai' or 'deepseek'.")
@@ -61,13 +61,20 @@ class Settings:
         ).expanduser().resolve()
 
         if provider == "openai":
-            api_key = _required("OPENAI_API_KEY")
-            base_url = _required("OPENAI_BASE_URL").rstrip("/")
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            base_url = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
             model = os.getenv("OPENAI_MODEL", "gpt-5.6").strip()
+            if require_cloud:
+                if not api_key:
+                    raise ValueError("OPENAI_API_KEY is required when AI_PROVIDER=openai.")
+                if not base_url:
+                    raise ValueError("OPENAI_BASE_URL is required when AI_PROVIDER=openai.")
         else:
-            api_key = _required("DEEPSEEK_API_KEY")
+            api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
             base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
             model = os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip()
+            if require_cloud and not api_key:
+                raise ValueError("DEEPSEEK_API_KEY is required when AI_PROVIDER=deepseek.")
 
         return Settings(
             provider=provider,
@@ -285,7 +292,7 @@ async def _run_deepseek_stateless(
 
 async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False) -> int:
     load_dotenv()
-    settings = Settings.from_env()
+    settings = Settings.from_env(require_cloud=not (bootstrap_only or list_tools))
 
     if not settings.mcp_project.exists():
         raise FileNotFoundError(
