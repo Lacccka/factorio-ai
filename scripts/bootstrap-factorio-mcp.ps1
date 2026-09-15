@@ -57,6 +57,42 @@ if ($replacementCount -eq 0) {
 Copy-Item -Force $PlayerTargetPatch (Join-Path $Target "FactorioMCP/Services/FactorioPlayerTarget.cs")
 Copy-Item -Force $BootstrapToolsPatch (Join-Path $Target "FactorioMCP/Tools/BootstrapStateTools.cs")
 
+# Factorio 2.0 electric poles no longer expose LuaEntity.neighbours. The pinned
+# upstream topology tool still uses pole.neighbours.copper, which raises
+# "Neighbours can't be used on this entity". Read real copper-wire connections
+# through LuaWireConnector instead (Factorio 2.0.72 API).
+$energyServicePath = Join-Path $Target "FactorioMCP/Services/EnergyService.cs"
+$energyService = [System.IO.File]::ReadAllText($energyServicePath).Replace("`r`n", "`n")
+$oldTopologyBlock = @'
+                    local nb = {}
+                    for _, n in pairs(pole.neighbours.copper) do
+                        if n.electric_network_id == nid then
+                            nb[#nb+1] = '{"name":"'..esc(n.name)..'","x":'..string.format("%.1f",n.position.x)..',"y":'..string.format("%.1f",n.position.y)..'}'
+                        end
+                    end
+'@
+$newTopologyBlock = @'
+                    local nb = {}
+                    local connector = pole.get_wire_connector(defines.wire_connector_id.pole_copper, false)
+                    if connector then
+                        for _, connection in pairs(connector.real_connections) do
+                            local target_connector = connection.target
+                            local n = target_connector and target_connector.owner or nil
+                            if n and n.valid and n.type == "electric-pole" and n.electric_network_id == nid then
+                                nb[#nb+1] = '{"name":"'..esc(n.name)..'","x":'..string.format("%.1f",n.position.x)..',"y":'..string.format("%.1f",n.position.y)..'}'
+                            end
+                        end
+                    end
+'@
+if (-not $energyService.Contains($oldTopologyBlock)) {
+    throw "Could not patch EnergyService topology: upstream neighbour block changed."
+}
+$energyService = $energyService.Replace($oldTopologyBlock, $newTopologyBlock)
+if ($energyService.Contains("pole.neighbours.copper")) {
+    throw "EnergyService topology patch incomplete: pole.neighbours.copper remains."
+}
+Write-Utf8NoBom $energyServicePath $energyService
+
 $programPath = Join-Path $Target "FactorioMCP/Program.cs"
 $program = [System.IO.File]::ReadAllText($programPath)
 $programNeedle = "    .AddSingleton<FactorioService>()"
@@ -136,6 +172,7 @@ if ($remaining) {
 }
 
 Write-Host "Patched $replacementCount player references."
+Write-Host "Patched Factorio 2.0 power-topology wire traversal."
 Write-Host "Building FactorioMCP..."
 dotnet build (Join-Path $Target "FactorioMCP.sln")
 if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
