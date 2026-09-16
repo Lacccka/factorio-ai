@@ -37,6 +37,10 @@ from . import checkpoint_policy as checkpoint_policy  # noqa: E402,F401
 # speed is only capacity headroom.
 from . import throughput_semantics as throughput_semantics  # noqa: E402,F401
 
+# Planning policy is versioned. A checkpoint created before demand-driven rate semantics
+# must be resubmitted instead of silently continuing an old overbuilt architecture.
+from . import plan_policy_revision as plan_policy_revision  # noqa: E402,F401
+
 # Structural safety remains strict: destructive removals and source-trunk splitter taps
 # must be explicit and geometrically safe.
 from . import plan_execution_guard as plan_execution_guard  # noqa: E402,F401
