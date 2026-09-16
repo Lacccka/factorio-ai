@@ -20,6 +20,16 @@ class PlanningValidatorTests(unittest.IsolatedAsyncioTestCase):
                         "products": [{"type": "item", "name": "stone-wall", "amount": 1, "probability": 1}],
                     }
                 )
+            if recipe == "stone-brick":
+                return json.dumps(
+                    {
+                        "success": True,
+                        "name": "stone-brick",
+                        "energy": 3.2,
+                        "ingredients": [{"type": "item", "name": "stone", "amount": 2}],
+                        "products": [{"type": "item", "name": "stone-brick", "amount": 1, "probability": 1}],
+                    }
+                )
             raise AssertionError(f"unexpected recipe {recipe}")
         if name == "get_entity_prototype":
             entity = args["entityName"]
@@ -31,6 +41,21 @@ class PlanningValidatorTests(unittest.IsolatedAsyncioTestCase):
                         "tile_height": 3,
                         "type": "assembling-machine",
                         "crafting_speed": 0.75,
+                        "has_burner": False,
+                    }
+                )
+            if entity == "steel-furnace":
+                return json.dumps(
+                    {
+                        "entity": entity,
+                        "tile_width": 2,
+                        "tile_height": 2,
+                        "type": "furnace",
+                        "crafting_speed": 2.0,
+                        "energy_usage": 1500,
+                        "has_burner": True,
+                        "burner_effectivity": 1.0,
+                        "burner_fuel_categories": ["chemical"],
                     }
                 )
             if entity in {"small-electric-pole", "transport-belt"}:
@@ -40,9 +65,22 @@ class PlanningValidatorTests(unittest.IsolatedAsyncioTestCase):
                         "tile_width": 1,
                         "tile_height": 1,
                         "type": "electric-pole" if entity == "small-electric-pole" else "transport-belt",
+                        "has_burner": False,
                     }
                 )
             raise AssertionError(f"unexpected prototype {entity}")
+        if name == "get_item_fuel_info":
+            item = args["itemName"]
+            if item == "coal":
+                return json.dumps(
+                    {
+                        "success": True,
+                        "item": "coal",
+                        "fuel_value": 4_000_000,
+                        "fuel_category": "chemical",
+                    }
+                )
+            return json.dumps({"success": False, "error": "unknown_item", "item": item})
         if name == "check_entity_placement_batch":
             placements = json.loads(args["placementsJson"])
             return json.dumps(
@@ -170,6 +208,96 @@ class PlanningValidatorTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
+    @staticmethod
+    def _burner_plan(include_fuel: bool = True) -> dict:
+        routes = [
+            {
+                "id": "stone-in",
+                "item": "stone",
+                "role": "input",
+                "belt": "transport-belt",
+                "lane": "both",
+                "source_mode": "new",
+                "source": {"x": 0.0, "y": 0.0},
+                "sink": {"x": 10.0, "y": 0.0},
+                "segments": [
+                    {
+                        "from": {"x": 0.0, "y": 0.0},
+                        "to": {"x": 10.0, "y": 0.0},
+                        "direction": "east",
+                    }
+                ],
+                "feeds_blocks": ["bricks"],
+            },
+            {
+                "id": "brick-out",
+                "item": "stone-brick",
+                "role": "output",
+                "belt": "transport-belt",
+                "lane": "both",
+                "source_mode": "new",
+                "source": {"x": 0.0, "y": 4.0},
+                "sink": {"x": 10.0, "y": 4.0},
+                "segments": [
+                    {
+                        "from": {"x": 0.0, "y": 4.0},
+                        "to": {"x": 10.0, "y": 4.0},
+                        "direction": "east",
+                    }
+                ],
+                "source_blocks": ["bricks"],
+            },
+        ]
+        if include_fuel:
+            routes.insert(
+                1,
+                {
+                    "id": "coal-fuel",
+                    "item": "coal",
+                    "role": "fuel",
+                    "belt": "transport-belt",
+                    "lane": "left",
+                    "source_mode": "new",
+                    "source": {"x": 0.0, "y": 1.0},
+                    "sink": {"x": 10.0, "y": 1.0},
+                    "segments": [
+                        {
+                            "from": {"x": 0.0, "y": 1.0},
+                            "to": {"x": 10.0, "y": 1.0},
+                            "direction": "east",
+                        }
+                    ],
+                    "feeds_blocks": ["bricks"],
+                },
+            )
+        return {
+            "production_blocks": [
+                {
+                    "id": "bricks",
+                    "recipe": "stone-brick",
+                    "machine": "steel-furnace",
+                    "machine_count": 2,
+                    "target_item": "stone-brick",
+                }
+            ],
+            "material_routes": routes,
+            "placements": [
+                {
+                    "id": "furnace-1",
+                    "entity_name": "steel-furnace",
+                    "x": 0.0,
+                    "y": 2.0,
+                    "direction": "north",
+                    "block_id": "bricks",
+                }
+            ],
+            "power": {
+                "pole_type": "small-electric-pole",
+                "pole_ids": [],
+                "existing_anchor": {"x": 5.0, "y": 0.0},
+            },
+        }
+
     async def test_three_wall_assemblers_exceed_yellow_belt_capacity(self):
         result = await validate_factory_plan(
             self._plan(machine_count=3),
@@ -201,6 +329,37 @@ class PlanningValidatorTests(unittest.IsolatedAsyncioTestCase):
             "existing_belt_extension_direction_mismatch",
             {issue["code"] for issue in result["issues"]},
         )
+
+    async def test_burner_furnace_coal_route_has_deterministic_fuel_rate(self):
+        result = await validate_factory_plan(
+            self._burner_plan(include_fuel=True),
+            self._call_mcp,
+            {
+                "get_recipe_details",
+                "get_entity_prototype",
+                "get_item_fuel_info",
+                "check_entity_placement_batch",
+                "get_nearby_entities",
+            },
+        )
+        self.assertTrue(result["valid"], result)
+        fuel_route = next(route for route in result["material_routes"] if route["id"] == "coal-fuel")
+        self.assertAlmostEqual(fuel_route["required_rate_per_second"], 0.045, places=6)
+
+    async def test_burner_production_block_requires_fuel_route(self):
+        result = await validate_factory_plan(
+            self._burner_plan(include_fuel=False),
+            self._call_mcp,
+            {
+                "get_recipe_details",
+                "get_entity_prototype",
+                "get_item_fuel_info",
+                "check_entity_placement_batch",
+                "get_nearby_entities",
+            },
+        )
+        self.assertFalse(result["valid"])
+        self.assertIn("burner_block_missing_fuel_route", {issue["code"] for issue in result["issues"]})
 
 
 if __name__ == "__main__":
