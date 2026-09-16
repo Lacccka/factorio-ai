@@ -94,6 +94,11 @@ def _resume_call_allowed(metrics: base.RunMetrics, name: str) -> tuple[bool, str
     return True, ""
 
 
+def _visible_call_allowed(tool_names: set[str], name: str) -> bool:
+    # PLAN_TOOL_NAME is orchestrator-local and therefore absent from MCP's list_tools().
+    return name == PLAN_TOOL_NAME or name in tool_names
+
+
 async def _execute_function_calls_resilient(
     session: Any,
     response: Any,
@@ -102,28 +107,30 @@ async def _execute_function_calls_resilient(
     tool_names: set[str],
     plan_gated: bool,
 ) -> list[dict[str, Any]]:
-    # Outside resume-repair mode retain the existing batched implementation.
-    if (
-        not plan_gated
-        or metrics.plan_validated
-        or not bool(getattr(metrics, "_resume_repair_mode", False))
-    ):
-        return await _PERSISTENT_EXECUTE_FUNCTION_CALLS(
-            session,
-            response,
-            settings,
-            metrics,
-            tool_names,
-            plan_gated,
-        )
-
-    # DeepSeek can emit dozens of function calls in a single response. Enforce the resume
-    # policy per call, not merely by changing the next turn's tool schema.
+    # Enforce authorization per returned call. Merely hiding a tool schema is not a
+    # security boundary: a hallucinated or injected function name must never reach MCP.
     outputs: list[dict[str, Any]] = []
     for item in getattr(response, "output", []) or []:
         if getattr(item, "type", None) != "function_call":
             continue
         name = str(getattr(item, "name", ""))
+
+        if not _visible_call_allowed(tool_names, name):
+            metrics.tool_calls += 1
+            tool_output = (
+                "TOOL_NOT_ALLOWED: this function is not in the orchestrator-visible tool allowlist. "
+                "Use only tools advertised for the current run."
+            )
+            print(f"[tool-blocked] {name} -> not in visible allowlist", file=sys.stderr)
+            outputs.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": tool_output,
+                }
+            )
+            continue
+
         allowed, reason = _resume_call_allowed(metrics, name)
         if not allowed:
             metrics.tool_calls += 1
@@ -142,6 +149,8 @@ async def _execute_function_calls_resilient(
             )
             continue
 
+        # Delegate one call at a time so both the security allowlist and resume diagnostic
+        # budget are enforced even when a model emits a large parallel batch in one response.
         single_response = SimpleNamespace(output=[item])
         executed = await _PERSISTENT_EXECUTE_FUNCTION_CALLS(
             session,
