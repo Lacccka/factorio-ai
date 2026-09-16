@@ -15,6 +15,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import AsyncOpenAI
 
+from .planning import PLAN_TOOL_NAME, PLAN_TOOL_SCHEMA, validate_factory_plan
 from .prompts import DANGEROUS_TOOL_NAMES, SYSTEM_PROMPT
 
 
@@ -92,6 +93,7 @@ TOOL_RESULT_CAPS = {
     "count_item_in_world": 12_000,
     "get_area_occupancy": 12_000,
     "inspect_entity_multiple": 12_000,
+    "check_entity_placement_batch": 12_000,
 }
 DEFAULT_TOOL_RESULT_CAP = 20_000
 
@@ -172,6 +174,9 @@ class RunMetrics:
     output_tokens: int = 0
     total_tokens: int = 0
     mutation_budget_exhausted: bool = False
+    plan_validation_attempts: int = 0
+    plan_validated: bool = False
+    validated_plan: dict[str, Any] | None = None
 
 
 def _required(name: str) -> str:
@@ -366,6 +371,8 @@ def _print_metrics(metrics: RunMetrics) -> None:
         f"mutation_calls={metrics.mutation_calls} "
         f"failed_mutations={metrics.failed_mutations} "
         f"blocked_mutations={metrics.blocked_mutations} "
+        f"plan_validation_attempts={metrics.plan_validation_attempts} "
+        f"plan_validated={str(metrics.plan_validated).lower()} "
         f"input_tokens={metrics.input_tokens} "
         f"output_tokens={metrics.output_tokens} "
         f"total_tokens={metrics.total_tokens}",
@@ -409,11 +416,29 @@ async def _bootstrap_existing_save(
     return "\n\n".join(sections)
 
 
+def _active_tools(
+    all_tools: list[dict[str, Any]],
+    gated_tools: list[dict[str, Any]],
+    read_only_tools: list[dict[str, Any]],
+    metrics: RunMetrics,
+    plan_gated: bool,
+) -> list[dict[str, Any]]:
+    if metrics.mutation_budget_exhausted:
+        if plan_gated:
+            return [*read_only_tools, PLAN_TOOL_SCHEMA]
+        return read_only_tools
+    if plan_gated and not metrics.plan_validated:
+        return gated_tools
+    return all_tools
+
+
 async def _execute_function_calls(
     session: ClientSession,
     response: Any,
     settings: Settings,
     metrics: RunMetrics,
+    tool_names: set[str],
+    plan_gated: bool,
 ) -> list[dict[str, Any]]:
     outputs: list[dict[str, Any]] = []
     for item in response.output:
@@ -437,20 +462,54 @@ async def _execute_function_calls(
                 if mutating:
                     metrics.failed_mutations += 1
             else:
-                if mutating:
-                    metrics.mutation_calls += 1
+                if item.name == PLAN_TOOL_NAME:
+                    if not plan_gated:
+                        tool_output = json.dumps(
+                            {
+                                "valid": False,
+                                "status": "PLAN_GATE_DISABLED",
+                                "message": "submit_factory_plan is only available in --plan-gated mode.",
+                            },
+                            ensure_ascii=False,
+                        )
+                    else:
+                        metrics.plan_validation_attempts += 1
+                        print(f"[plan] validating structured factory plan attempt={metrics.plan_validation_attempts}", file=sys.stderr)
 
-                print(f"[tool] {item.name} {json.dumps(arguments, ensure_ascii=False)}", file=sys.stderr)
-                tool_output = await _call_tool(
-                    session,
-                    item.name,
-                    arguments,
-                    settings.tool_result_max_chars,
-                )
-                print(f"[tool] {item.name} -> {tool_output[:300]}", file=sys.stderr)
+                        async def call_for_validation(name: str, args: dict[str, Any]) -> str:
+                            return await _call_tool(session, name, args, settings.tool_result_max_chars)
 
-                if mutating and _is_tool_failure(tool_output):
-                    metrics.failed_mutations += 1
+                        validation = await validate_factory_plan(
+                            arguments.get("plan"),
+                            call_for_validation,
+                            tool_names,
+                        )
+                        if validation.get("valid") is True:
+                            metrics.plan_validated = True
+                            plan = arguments.get("plan")
+                            metrics.validated_plan = plan if isinstance(plan, dict) else None
+                            print("[plan] PLAN_VALID; mutating tools unlocked", file=sys.stderr)
+                        else:
+                            metrics.plan_validated = False
+                            metrics.validated_plan = None
+                            print(f"[plan] PLAN_INVALID issues={validation.get('issue_count', '?')}", file=sys.stderr)
+                        tool_output = json.dumps(validation, ensure_ascii=False, separators=(",", ":"))
+                    print(f"[tool] {item.name} -> {tool_output[:500]}", file=sys.stderr)
+                else:
+                    if mutating:
+                        metrics.mutation_calls += 1
+
+                    print(f"[tool] {item.name} {json.dumps(arguments, ensure_ascii=False)}", file=sys.stderr)
+                    tool_output = await _call_tool(
+                        session,
+                        item.name,
+                        arguments,
+                        settings.tool_result_max_chars,
+                    )
+                    print(f"[tool] {item.name} -> {tool_output[:300]}", file=sys.stderr)
+
+                    if mutating and _is_tool_failure(tool_output):
+                        metrics.failed_mutations += 1
 
             if mutating and _budget_exhausted(settings, metrics):
                 metrics.mutation_budget_exhausted = True
@@ -473,32 +532,34 @@ async def _run_openai_stateful(
     client: AsyncOpenAI,
     settings: Settings,
     goal: str,
-    tools: list[dict[str, Any]],
+    all_tools: list[dict[str, Any]],
+    gated_tools: list[dict[str, Any]],
     read_only_tools: list[dict[str, Any]],
     bootstrap: str,
     metrics: RunMetrics,
+    tool_names: set[str],
+    plan_gated: bool,
 ) -> str:
     initial_input = f"USER GOAL:\n{goal}\n\nEXISTING SAVE BOOTSTRAP:\n{bootstrap}"
     response = await client.responses.create(
         model=settings.model,
         instructions=SYSTEM_PROMPT,
         input=initial_input,
-        tools=tools,
+        tools=_active_tools(all_tools, gated_tools, read_only_tools, metrics, plan_gated),
     )
     _record_response_usage(response, metrics)
 
     for _ in range(settings.max_turns):
-        outputs = await _execute_function_calls(session, response, settings, metrics)
+        outputs = await _execute_function_calls(session, response, settings, metrics, tool_names, plan_gated)
         if not outputs:
             return response.output_text or "(model completed without text output)"
 
-        active_tools = read_only_tools if metrics.mutation_budget_exhausted else tools
         response = await client.responses.create(
             model=settings.model,
             instructions=SYSTEM_PROMPT,
             previous_response_id=response.id,
             input=outputs,
-            tools=active_tools,
+            tools=_active_tools(all_tools, gated_tools, read_only_tools, metrics, plan_gated),
         )
         _record_response_usage(response, metrics)
 
@@ -510,10 +571,13 @@ async def _run_deepseek_stateless(
     client: AsyncOpenAI,
     settings: Settings,
     goal: str,
-    tools: list[dict[str, Any]],
+    all_tools: list[dict[str, Any]],
+    gated_tools: list[dict[str, Any]],
     read_only_tools: list[dict[str, Any]],
     bootstrap: str,
     metrics: RunMetrics,
+    tool_names: set[str],
+    plan_gated: bool,
 ) -> str:
     history: list[dict[str, Any]] = [
         {
@@ -523,16 +587,15 @@ async def _run_deepseek_stateless(
     ]
 
     for _ in range(settings.max_turns):
-        active_tools = read_only_tools if metrics.mutation_budget_exhausted else tools
         response = await client.responses.create(
             model=settings.model,
             instructions=SYSTEM_PROMPT,
             input=history,
-            tools=active_tools,
+            tools=_active_tools(all_tools, gated_tools, read_only_tools, metrics, plan_gated),
         )
         _record_response_usage(response, metrics)
 
-        outputs = await _execute_function_calls(session, response, settings, metrics)
+        outputs = await _execute_function_calls(session, response, settings, metrics, tool_names, plan_gated)
         if not outputs:
             return response.output_text or "(model completed without text output)"
 
@@ -546,7 +609,12 @@ async def _run_deepseek_stateless(
     raise RuntimeError(f"Agent exceeded AGENT_MAX_TURNS={settings.max_turns}.")
 
 
-async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False) -> int:
+async def run(
+    goal: str,
+    bootstrap_only: bool = False,
+    list_tools: bool = False,
+    plan_gated: bool = False,
+) -> int:
     load_dotenv()
     settings = Settings.from_env(require_cloud=not (bootstrap_only or list_tools))
 
@@ -573,9 +641,18 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
             tool_names = {tool.name for tool in visible_tools}
 
             if list_tools:
-                for name in sorted(tool_names):
+                names = set(tool_names)
+                if plan_gated:
+                    names.add(PLAN_TOOL_NAME)
+                for name in sorted(names):
                     print(name)
                 return 0
+
+            if plan_gated and "check_entity_placement_batch" not in tool_names:
+                raise RuntimeError(
+                    "--plan-gated requires check_entity_placement_batch from the patched FactorioMCP. "
+                    "Run scripts/bootstrap-factorio-mcp.ps1 after pulling the latest branch."
+                )
 
             bootstrap = await _bootstrap_existing_save(
                 session,
@@ -587,10 +664,12 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
                 print(bootstrap)
                 return 0
 
-            tools = [_tool_schema(tool) for tool in visible_tools]
+            mcp_tools = [_tool_schema(tool) for tool in visible_tools]
             read_only_tools = [
-                tool for tool in tools if not _is_mutating_tool(str(tool.get("name", "")))
+                tool for tool in mcp_tools if not _is_mutating_tool(str(tool.get("name", "")))
             ]
+            all_tools = [*mcp_tools, PLAN_TOOL_SCHEMA] if plan_gated else mcp_tools
+            gated_tools = [*read_only_tools, PLAN_TOOL_SCHEMA] if plan_gated else read_only_tools
             client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
             metrics = RunMetrics(started_at=time.perf_counter())
 
@@ -604,6 +683,11 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
                 f"max_failed_mutations={settings.max_failed_mutations}",
                 file=sys.stderr,
             )
+            if plan_gated:
+                print(
+                    "[plan-gate] enabled; mutating tools remain hidden until submit_factory_plan returns PLAN_VALID",
+                    file=sys.stderr,
+                )
 
             try:
                 if settings.provider == "openai":
@@ -612,10 +696,13 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
                         client,
                         settings,
                         goal,
-                        tools,
+                        all_tools,
+                        gated_tools,
                         read_only_tools,
                         bootstrap,
                         metrics,
+                        tool_names,
+                        plan_gated,
                     )
                 else:
                     final_text = await _run_deepseek_stateless(
@@ -623,10 +710,13 @@ async def run(goal: str, bootstrap_only: bool = False, list_tools: bool = False)
                         client,
                         settings,
                         goal,
-                        tools,
+                        all_tools,
+                        gated_tools,
                         read_only_tools,
                         bootstrap,
                         metrics,
+                        tool_names,
+                        plan_gated,
                     )
 
                 print(final_text)
@@ -655,6 +745,14 @@ def _parse_args() -> argparse.Namespace:
         "--list-tools",
         action="store_true",
         help="List the MCP tools exposed to the cloud model and exit.",
+    )
+    parser.add_argument(
+        "--plan-gated",
+        action="store_true",
+        help=(
+            "Start with mutating tools hidden. The model must submit a structured factory plan that passes deterministic "
+            "validation before world-changing tools are exposed. Intended for large factory expansion/build tasks."
+        ),
     )
     return parser.parse_args()
 
@@ -691,7 +789,7 @@ def _print_exception(exc: BaseException) -> None:
 def main() -> None:
     args = _parse_args()
     try:
-        raise SystemExit(asyncio.run(run(args.goal, args.bootstrap_only, args.list_tools)))
+        raise SystemExit(asyncio.run(run(args.goal, args.bootstrap_only, args.list_tools, args.plan_gated)))
     except KeyboardInterrupt:
         raise SystemExit(130)
     except Exception as exc:
