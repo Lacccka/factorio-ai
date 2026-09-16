@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import defaultdict
 from typing import Any, Awaitable, Callable
 
 from . import app as base
@@ -12,6 +13,11 @@ CallMcp = Callable[[str, dict[str, Any]], Awaitable[str]]
 _PRIOR_VALIDATE_FACTORY_PLAN = base.validate_factory_plan
 _MAX_REPORTED_ROUTE_CONFLICTS = 12
 _BATCH_SIZE = 500
+_UNDERGROUND_MAX_DISTANCE = {
+    "underground-belt": 5,
+    "fast-underground-belt": 7,
+    "express-underground-belt": 9,
+}
 
 
 def _number(value: Any) -> float | None:
@@ -50,6 +56,59 @@ def _key(x: float, y: float) -> tuple[int, int]:
     return round(x * 10), round(y * 10)
 
 
+def _planned_underground_coverage(plan: dict[str, Any]) -> set[tuple[int, int]]:
+    """Return surface tiles intentionally bypassed by planned underground-belt pairs.
+
+    Material-route segments describe logical continuity, so a straight segment may span
+    several surface tiles that are *not* meant to contain ordinary belts. Without this,
+    preflighting every logical route tile would incorrectly reject a valid underground
+    crossing over an existing belt/furnace. Explicit underground endpoints are validated
+    by the normal placement validator; this helper only suppresses ordinary-belt checks
+    for the covered span between a plausible pair.
+    """
+
+    groups: dict[tuple[str, str, int], list[float]] = defaultdict(list)
+    for placement in plan.get("placements", []) or []:
+        if not isinstance(placement, dict):
+            continue
+        name = str(placement.get("entity_name", ""))
+        max_distance = _UNDERGROUND_MAX_DISTANCE.get(name)
+        if max_distance is None:
+            continue
+        direction = str(placement.get("direction", "north")).lower()
+        x = _number(placement.get("x"))
+        y = _number(placement.get("y"))
+        if x is None or y is None:
+            continue
+        if direction in {"east", "west"}:
+            groups[(name, direction, round(y * 10))].append(x)
+        elif direction in {"north", "south"}:
+            groups[(name, direction, round(x * 10))].append(y)
+
+    covered: set[tuple[int, int]] = set()
+    for (name, direction, fixed), values in groups.items():
+        values = sorted(set(values))
+        max_center_distance = _UNDERGROUND_MAX_DISTANCE[name] + 1.0
+        index = 0
+        while index + 1 < len(values):
+            first = values[index]
+            second = values[index + 1]
+            distance = abs(second - first)
+            if distance < 1.0 - 0.05 or distance > max_center_distance + 0.05:
+                index += 1
+                continue
+            steps = int(round(distance))
+            step = 1.0 if second > first else -1.0
+            for offset in range(steps + 1):
+                variable = first + step * offset
+                if direction in {"east", "west"}:
+                    covered.add((round(variable * 10), fixed))
+                else:
+                    covered.add((fixed, round(variable * 10)))
+            index += 2
+    return covered
+
+
 def _route_tiles(plan: dict[str, Any]) -> list[dict[str, Any]]:
     explicit_points: set[tuple[int, int]] = set()
     for placement in plan.get("placements", []) or []:
@@ -59,6 +118,7 @@ def _route_tiles(plan: dict[str, Any]) -> list[dict[str, Any]]:
         y = _number(placement.get("y"))
         if x is not None and y is not None:
             explicit_points.add(_key(x, y))
+    underground_coverage = _planned_underground_coverage(plan)
 
     tiles: list[dict[str, Any]] = []
     seen: set[tuple[str, int, int]] = set()
@@ -105,13 +165,17 @@ def _route_tiles(plan: dict[str, Any]) -> list[dict[str, Any]]:
             for step in range(steps + 1):
                 x = x1 + step_x * step
                 y = y1 + step_y * step
+                point_key = _key(x, y)
                 if tap_source and abs(x - source_x) <= 0.05 and abs(y - source_y) <= 0.05:
                     # The source lane is occupied by the validated tap splitter after replacement.
                     continue
-                if _key(x, y) in explicit_points:
-                    # Splitters/undergrounds/etc. are already preflighted as explicit placements.
+                if point_key in explicit_points:
+                    # Splitters/underground endpoints/etc. are preflighted as explicit placements.
                     continue
-                unique = (belt, *_key(x, y))
+                if point_key in underground_coverage:
+                    # Logical route continuity crosses below the surface here; no ordinary belt tile is intended.
+                    continue
+                unique = (belt, *point_key)
                 if unique in seen:
                     continue
                 seen.add(unique)
