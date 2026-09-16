@@ -37,30 +37,22 @@ world_model._TOOL_SECTIONS.update(
     }
 )
 
-# Install the strict PLAN_VALID execution contract after all persistence/resume seams are
-# in place. This makes exact planned removals and two-tile splitter tap geometry part of
-# validation, then blocks any world mutation that tries to improvise beyond that plan.
+# Keep strict validation for dangerous/structural operations: destructive removals and
+# two-tile splitter taps into existing trunks must be explicit and geometrically safe.
 from . import plan_execution_guard as plan_execution_guard  # noqa: E402,F401
 
-# Validate mixed pole chains using Factorio's actual shorter-end wire reach. The previous
-# geometric check used the new pole type's reach for the existing anchor as well, which can
-# approve a medium-pole hop that a small existing anchor cannot physically connect.
+# Validate mixed pole chains using Factorio's actual shorter-end wire reach. This remains
+# an architectural feasibility invariant, not per-tile execution micromanagement.
 from . import power_reach_guard as power_reach_guard  # noqa: E402,F401
 
-# Material-route segments are executable geometry too. Preflight every ordinary belt tile
-# so furnaces, poles, cliffs, etc. cannot hide inside a PLAN_VALID route merely because the
-# validator only checked explicit splitter/underground/inserter placements.
-from . import route_preflight_guard as route_preflight_guard  # noqa: E402,F401
-
-# Exact additive placements may be batched after PLAN_VALID, while destructive batch
-# mutations stay forbidden. Also give execution its own turn allowance so a successful
-# planning phase cannot consume the entire cloud-turn budget before mechanical build work.
+# Exact additive placements can still be batched after PLAN_VALID and execution gets its
+# own turn allowance so planning cannot consume the complete runtime budget.
 from . import execution_batch_guard as execution_batch_guard  # noqa: E402,F401
 
-# PLAN_VALID describes a snapshot, not an immutable universe. If an authorized placement
-# still hits a live collision during execution, revoke the stale plan, preserve completed
-# work, reopen a narrow repair phase and require a corrected PLAN_VALID before continuing.
-from . import adaptive_replan_guard as adaptive_replan_guard  # noqa: E402,F401
+# PLAN_VALID is an architectural contract. Ordinary belt/underground geometry and small
+# pole shifts may adapt locally to live obstacles while sources, taps, destructive changes,
+# machines and inserter relationships stay protected.
+from . import architectural_execution_guard as architectural_execution_guard  # noqa: E402,F401
 
 
 def main() -> None:
