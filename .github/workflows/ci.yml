@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Validate Worker syntax
+        run: node --check worker/worker.js
+
+      - name: Install orchestrator
+        run: python -m pip install -e ./src/orchestrator
+
+      - name: Validate orchestrator CLI
+        run: factorio-ai --help
+
+      - name: Validate planning smoke script syntax
+        run: python -m py_compile scripts/smoke-planning-tools.py
+
+      - name: Run orchestrator tests
+        run: python -m unittest discover -s src/orchestrator/tests -v
+
+      - name: Validate offline bootstrap configuration
+        env:
+          FACTORIO_PLAYER_NAME: ci-player
+          FACTORIO_RCON_PASSWORD: ci-password
+          AI_PROVIDER: openai
+        run: python -c "from factorio_ai.app import Settings; s = Settings.from_env(require_cloud=False); assert s.player_name == 'ci-player' and s.api_key == ''"
+
+      - name: Bootstrap and build patched FactorioMCP
+        shell: pwsh
+        run: ./scripts/bootstrap-factorio-mcp.ps1

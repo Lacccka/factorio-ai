@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factorio-ai-orchestrator"
+version = "0.1.0"
+description = "Cloud-model orchestrator for FactorioMCP"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.0,<2",
+  "openai>=1.0,<3",
+  "python-dotenv>=1.0,<2",
+]
+
+[project.scripts]
+factorio-ai = "factorio_ai.runtime_app:main"
+factorio-survey = "factorio_ai.survey_app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["factorio_ai*"]

@@ -1,0 +1,801 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from dotenv import load_dotenv
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from openai import AsyncOpenAI
+
+from .planning import PLAN_TOOL_NAME, PLAN_TOOL_SCHEMA, validate_factory_plan
+from .prompts import DANGEROUS_TOOL_NAMES, SYSTEM_PROMPT
+
+
+# Keep startup context compact. Large raw recipe/entity dumps are expensive and can
+# distract the model from the user's actual goal; it can query those details on demand.
+BOOTSTRAP_CALLS: list[tuple[str, dict[str, Any]]] = [
+    ("get_player_position", {}),
+    ("get_inventory_summary", {}),
+    ("get_research_status", {}),
+    ("get_researched_technologies", {}),
+    ("get_available_technologies", {}),
+    ("get_existing_factory_summary", {}),
+    ("get_electric_network", {}),
+    ("summarize_area", {"radius": 50}),
+]
+
+
+# Movement and read-only diagnostics are deliberately not budgeted. The guardrail is
+# for calls that can alter the world/inventory/research state. Prefix matching keeps it
+# effective when FactorioMCP adds related mutating tools without requiring a patch here.
+MUTATING_TOOL_NAMES = {
+    "craft",
+    "clear_remnants",
+}
+MUTATING_TOOL_PREFIXES = (
+    "place_",
+    "mine_",
+    "drop_",
+    "transfer_",
+    "insert_",
+    "remove_",
+    "pickup_",
+    "rotate_",
+    "revoke_",
+    "set_",
+    "connect_",
+    "disconnect_",
+    "research_",
+    "start_",
+    "cancel_",
+    "launch_",
+    "repair_",
+    "refuel_",
+    "execute_",
+    "equip_",
+    "unequip_",
+    "shoot_",
+    "attack_",
+    "drive_",
+    "enter_",
+    "exit_",
+    "toggle_",
+    "enable_",
+    "disable_",
+    "order_",
+    "revive_",
+)
+MUTATING_TOOL_EXCLUSIONS = {
+    "walk_to_position",
+    "safe_walk_to_position",
+    "emergency_stop",
+    "check_craft_feasibility",
+    "ensure_item",
+}
+
+# Large world scans are useful, but carrying tens of thousands of characters from every
+# scan through a stateful Responses conversation causes context growth to explode. The
+# model can always narrow the radius and query again when the compact result is not enough.
+TOOL_RESULT_CAPS = {
+    "take_screenshot": 12_000,
+    "get_nearby_entities": 12_000,
+    "get_flow_graph": 12_000,
+    "get_power_network_topology": 12_000,
+    "find_idle_machines": 12_000,
+    "count_item_in_world": 12_000,
+    "get_area_occupancy": 12_000,
+    "inspect_entity_multiple": 12_000,
+    "check_entity_placement_batch": 12_000,
+}
+DEFAULT_TOOL_RESULT_CAP = 20_000
+
+
+@dataclass(frozen=True)
+class Settings:
+    provider: str
+    player_name: str
+    rcon_host: str
+    rcon_port: str
+    rcon_password: str
+    mcp_project: Path
+    model: str
+    api_key: str
+    base_url: str
+    max_turns: int
+    max_mutations: int
+    max_failed_mutations: int
+    tool_result_max_chars: int
+
+    @staticmethod
+    def from_env(require_cloud: bool = True) -> "Settings":
+        provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
+        if provider not in {"openai", "deepseek"}:
+            raise ValueError("AI_PROVIDER must be 'openai' or 'deepseek'.")
+
+        player_name = _required("FACTORIO_PLAYER_NAME")
+        rcon_password = _required("FACTORIO_RCON_PASSWORD")
+        mcp_project = Path(
+            os.getenv(
+                "FACTORIO_MCP_PROJECT",
+                "src/FactorioMCP/FactorioMCP/FactorioMCP.csproj",
+            )
+        ).expanduser().resolve()
+
+        if provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            base_url = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
+            model = os.getenv("OPENAI_MODEL", "gpt-5.6").strip()
+            if require_cloud:
+                if not api_key:
+                    raise ValueError("OPENAI_API_KEY is required when AI_PROVIDER=openai.")
+                if not base_url:
+                    raise ValueError("OPENAI_BASE_URL is required when AI_PROVIDER=openai.")
+        else:
+            api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+            base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
+            model = os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip()
+            if require_cloud and not api_key:
+                raise ValueError("DEEPSEEK_API_KEY is required when AI_PROVIDER=deepseek.")
+
+        return Settings(
+            provider=provider,
+            player_name=player_name,
+            rcon_host=os.getenv("FACTORIO_RCON_HOST", "127.0.0.1").strip(),
+            rcon_port=os.getenv("FACTORIO_RCON_PORT", "27015").strip(),
+            rcon_password=rcon_password,
+            mcp_project=mcp_project,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            max_turns=_positive_int("AGENT_MAX_TURNS", 80),
+            max_mutations=_positive_int("AGENT_MAX_MUTATIONS", 80),
+            max_failed_mutations=_positive_int("AGENT_MAX_FAILED_MUTATIONS", 8),
+            tool_result_max_chars=_positive_int("AGENT_TOOL_RESULT_MAX_CHARS", DEFAULT_TOOL_RESULT_CAP),
+        )
+
+
+@dataclass
+class RunMetrics:
+    started_at: float
+    cloud_turns: int = 0
+    tool_calls: int = 0
+    mutation_calls: int = 0
+    failed_mutations: int = 0
+    blocked_mutations: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    mutation_budget_exhausted: bool = False
+    plan_validation_attempts: int = 0
+    plan_validated: bool = False
+    validated_plan: dict[str, Any] | None = None
+
+
+def _required(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise ValueError(f"{name} is required.")
+    return value
+
+
+def _positive_int(name: str, fallback: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return fallback
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
+
+
+def _mcp_env(settings: Settings) -> dict[str, str]:
+    return {
+        "FACTORIO_PLAYER_NAME": settings.player_name,
+        "FACTORIO_RCON_HOST": settings.rcon_host,
+        "FACTORIO_RCON_PORT": settings.rcon_port,
+        "FACTORIO_RCON_PASSWORD": settings.rcon_password,
+        "FACTORIO_GOALS_FILE": str(Path("state/goals.json").resolve()),
+        "FACTORIO_BUILDINGS_FILE": str(Path("state/buildings.json").resolve()),
+    }
+
+
+def _compact_text(value: str, limit: int) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
+
+
+def _compact_schema(value: Any) -> Any:
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"title", "$schema"}:
+                continue
+            if key == "description" and isinstance(item, str):
+                compact[key] = _compact_text(item, 240)
+            else:
+                compact[key] = _compact_schema(item)
+        return compact
+    if isinstance(value, list):
+        return [_compact_schema(item) for item in value]
+    return value
+
+
+def _tool_schema(tool: Any) -> dict[str, Any]:
+    schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
+    if not isinstance(schema, dict):
+        schema = {"type": "object", "properties": {}}
+    return {
+        "type": "function",
+        "name": tool.name,
+        "description": _compact_text(tool.description or "", 700),
+        "parameters": _compact_schema(schema),
+    }
+
+
+def _dump_model(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(exclude_none=True)
+    if isinstance(value, dict):
+        return value
+    raise TypeError(f"Cannot serialize response item of type {type(value)!r}")
+
+
+def _tool_result_text(result: Any, max_chars: int) -> str:
+    parts: list[str] = []
+    omitted_media = 0
+    for item in getattr(result, "content", []) or []:
+        item_type = str(getattr(item, "type", "")).lower()
+        if item_type in {"image", "audio"}:
+            # Function-call outputs are textual in this orchestrator. Serializing MCP image
+            # blocks as JSON only feeds the model base64 noise while permanently inflating
+            # every later stateful turn. Vision tools also return a structured text legend.
+            omitted_media += 1
+            continue
+
+        text = getattr(item, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+        elif hasattr(item, "model_dump_json"):
+            rendered = item.model_dump_json(exclude_none=True)
+            # Avoid accidentally carrying another opaque binary/data payload as text.
+            if len(rendered) > 4_000 and any(marker in rendered[:300].lower() for marker in ('"data"', '"blob"')):
+                omitted_media += 1
+            else:
+                parts.append(rendered)
+        else:
+            parts.append(str(item))
+
+    if omitted_media:
+        parts.append(f"[omitted {omitted_media} binary media block(s); structured text retained]")
+
+    output = "\n".join(parts).strip() or "(tool returned no text content)"
+    is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
+    if is_error:
+        output = "MCP_TOOL_ERROR:\n" + output
+    if len(output) > max_chars:
+        output = output[:max_chars] + f"\n...[truncated at {max_chars} chars; narrow the query and retry if needed]"
+    return output
+
+
+def _is_mutating_tool(name: str) -> bool:
+    if name in MUTATING_TOOL_EXCLUSIONS:
+        return False
+    if name in MUTATING_TOOL_NAMES:
+        return True
+    return any(name.startswith(prefix) for prefix in MUTATING_TOOL_PREFIXES)
+
+
+def _usage_int(usage: Any, name: str) -> int:
+    if usage is None:
+        return 0
+    if isinstance(usage, dict):
+        value = usage.get(name)
+    else:
+        value = getattr(usage, name, None)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_response_usage(response: Any, metrics: RunMetrics) -> None:
+    metrics.cloud_turns += 1
+    usage = getattr(response, "usage", None)
+    metrics.input_tokens += _usage_int(usage, "input_tokens")
+    metrics.output_tokens += _usage_int(usage, "output_tokens")
+    metrics.total_tokens += _usage_int(usage, "total_tokens")
+
+
+def _is_tool_failure(output: str) -> bool:
+    stripped = output.lstrip()
+    if stripped.startswith(("MCP_TOOL_ERROR:", "MCP_TOOL_EXCEPTION:", "INVALID_TOOL_ARGUMENTS:")):
+        return True
+    if "Cannot execute command. Error:" in stripped:
+        return True
+
+    try:
+        payload = json.loads(stripped)
+    except Exception:
+        return False
+
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("success") is False:
+        return True
+    if payload.get("error"):
+        return True
+    status = str(payload.get("status", "")).lower()
+    return status in {"error", "failed", "failure", "timeout", "stuck", "no_path"}
+
+
+def _budget_exhausted(settings: Settings, metrics: RunMetrics) -> bool:
+    return (
+        metrics.mutation_calls >= settings.max_mutations
+        or metrics.failed_mutations >= settings.max_failed_mutations
+    )
+
+
+def _budget_notice(settings: Settings, metrics: RunMetrics) -> str:
+    if metrics.failed_mutations >= settings.max_failed_mutations:
+        reason = (
+            f"failed mutation limit reached ({metrics.failed_mutations}/"
+            f"{settings.max_failed_mutations})"
+        )
+    else:
+        reason = f"mutation call limit reached ({metrics.mutation_calls}/{settings.max_mutations})"
+    return (
+        "MUTATION_BUDGET_REACHED: "
+        + reason
+        + ". Further mutating tools are disabled for this task. "
+        "Use read-only tools only if verification is still needed, then report the current state and blocker."
+    )
+
+
+def _print_metrics(metrics: RunMetrics) -> None:
+    elapsed = time.perf_counter() - metrics.started_at
+    print(
+        "[metrics] "
+        f"elapsed_s={elapsed:.1f} "
+        f"cloud_turns={metrics.cloud_turns} "
+        f"tool_calls={metrics.tool_calls} "
+        f"mutation_calls={metrics.mutation_calls} "
+        f"failed_mutations={metrics.failed_mutations} "
+        f"blocked_mutations={metrics.blocked_mutations} "
+        f"plan_validation_attempts={metrics.plan_validation_attempts} "
+        f"plan_validated={str(metrics.plan_validated).lower()} "
+        f"input_tokens={metrics.input_tokens} "
+        f"output_tokens={metrics.output_tokens} "
+        f"total_tokens={metrics.total_tokens}",
+        file=sys.stderr,
+    )
+
+
+async def _call_tool(
+    session: ClientSession,
+    name: str,
+    arguments: dict[str, Any],
+    max_chars: int,
+) -> str:
+    try:
+        result = await session.call_tool(name, arguments=arguments)
+        effective_cap = min(max_chars, TOOL_RESULT_CAPS.get(name, DEFAULT_TOOL_RESULT_CAP))
+        return _tool_result_text(result, effective_cap)
+    except Exception as exc:  # Tool failures are fed back to the model instead of killing the run.
+        return f"MCP_TOOL_EXCEPTION: {type(exc).__name__}: {exc}"
+
+
+async def _bootstrap_existing_save(
+    session: ClientSession,
+    tool_names: set[str],
+    max_chars: int,
+) -> str:
+    sections: list[str] = []
+    for name, arguments in BOOTSTRAP_CALLS:
+        if name not in tool_names:
+            continue
+        result = await _call_tool(session, name, arguments, max_chars)
+        sections.append(f"### {name}\n{result}")
+
+    if not sections:
+        available = ", ".join(sorted(tool_names)) or "(none)"
+        return (
+            "No bootstrap tools were available. Inspect the world manually with the available MCP tools before acting.\n"
+            f"MCP tools reported by the server: {available}"
+        )
+
+    return "\n\n".join(sections)
+
+
+def _active_tools(
+    all_tools: list[dict[str, Any]],
+    gated_tools: list[dict[str, Any]],
+    read_only_tools: list[dict[str, Any]],
+    metrics: RunMetrics,
+    plan_gated: bool,
+) -> list[dict[str, Any]]:
+    if metrics.mutation_budget_exhausted:
+        if plan_gated:
+            return [*read_only_tools, PLAN_TOOL_SCHEMA]
+        return read_only_tools
+    if plan_gated and not metrics.plan_validated:
+        return gated_tools
+    return all_tools
+
+
+async def _execute_function_calls(
+    session: ClientSession,
+    response: Any,
+    settings: Settings,
+    metrics: RunMetrics,
+    tool_names: set[str],
+    plan_gated: bool,
+) -> list[dict[str, Any]]:
+    outputs: list[dict[str, Any]] = []
+    for item in response.output:
+        if getattr(item, "type", None) != "function_call":
+            continue
+
+        metrics.tool_calls += 1
+        mutating = _is_mutating_tool(item.name)
+
+        if mutating and metrics.mutation_budget_exhausted:
+            metrics.blocked_mutations += 1
+            tool_output = _budget_notice(settings, metrics)
+            print(f"[tool-blocked] {item.name} -> {tool_output}", file=sys.stderr)
+        else:
+            try:
+                arguments = json.loads(item.arguments or "{}")
+                if not isinstance(arguments, dict):
+                    raise ValueError("function arguments must decode to a JSON object")
+            except Exception as exc:
+                tool_output = f"INVALID_TOOL_ARGUMENTS: {exc}; raw={item.arguments!r}"
+                if mutating:
+                    metrics.failed_mutations += 1
+            else:
+                if item.name == PLAN_TOOL_NAME:
+                    if not plan_gated:
+                        tool_output = json.dumps(
+                            {
+                                "valid": False,
+                                "status": "PLAN_GATE_DISABLED",
+                                "message": "submit_factory_plan is only available in --plan-gated mode.",
+                            },
+                            ensure_ascii=False,
+                        )
+                    else:
+                        metrics.plan_validation_attempts += 1
+                        print(f"[plan] validating structured factory plan attempt={metrics.plan_validation_attempts}", file=sys.stderr)
+
+                        async def call_for_validation(name: str, args: dict[str, Any]) -> str:
+                            return await _call_tool(session, name, args, settings.tool_result_max_chars)
+
+                        validation = await validate_factory_plan(
+                            arguments.get("plan"),
+                            call_for_validation,
+                            tool_names,
+                        )
+                        if validation.get("valid") is True:
+                            metrics.plan_validated = True
+                            plan = arguments.get("plan")
+                            metrics.validated_plan = plan if isinstance(plan, dict) else None
+                            print("[plan] PLAN_VALID; mutating tools unlocked", file=sys.stderr)
+                        else:
+                            metrics.plan_validated = False
+                            metrics.validated_plan = None
+                            print(f"[plan] PLAN_INVALID issues={validation.get('issue_count', '?')}", file=sys.stderr)
+                        tool_output = json.dumps(validation, ensure_ascii=False, separators=(",", ":"))
+                    print(f"[tool] {item.name} -> {tool_output[:500]}", file=sys.stderr)
+                else:
+                    if mutating:
+                        metrics.mutation_calls += 1
+
+                    print(f"[tool] {item.name} {json.dumps(arguments, ensure_ascii=False)}", file=sys.stderr)
+                    tool_output = await _call_tool(
+                        session,
+                        item.name,
+                        arguments,
+                        settings.tool_result_max_chars,
+                    )
+                    print(f"[tool] {item.name} -> {tool_output[:300]}", file=sys.stderr)
+
+                    if mutating and _is_tool_failure(tool_output):
+                        metrics.failed_mutations += 1
+
+            if mutating and _budget_exhausted(settings, metrics):
+                metrics.mutation_budget_exhausted = True
+                notice = _budget_notice(settings, metrics)
+                tool_output = tool_output + "\n\n" + notice
+                print(f"[budget] {notice}", file=sys.stderr)
+
+        outputs.append(
+            {
+                "type": "function_call_output",
+                "call_id": item.call_id,
+                "output": tool_output,
+            }
+        )
+    return outputs
+
+
+async def _run_openai_stateful(
+    session: ClientSession,
+    client: AsyncOpenAI,
+    settings: Settings,
+    goal: str,
+    all_tools: list[dict[str, Any]],
+    gated_tools: list[dict[str, Any]],
+    read_only_tools: list[dict[str, Any]],
+    bootstrap: str,
+    metrics: RunMetrics,
+    tool_names: set[str],
+    plan_gated: bool,
+) -> str:
+    initial_input = f"USER GOAL:\n{goal}\n\nEXISTING SAVE BOOTSTRAP:\n{bootstrap}"
+    response = await client.responses.create(
+        model=settings.model,
+        instructions=SYSTEM_PROMPT,
+        input=initial_input,
+        tools=_active_tools(all_tools, gated_tools, read_only_tools, metrics, plan_gated),
+    )
+    _record_response_usage(response, metrics)
+
+    for _ in range(settings.max_turns):
+        outputs = await _execute_function_calls(session, response, settings, metrics, tool_names, plan_gated)
+        if not outputs:
+            return response.output_text or "(model completed without text output)"
+
+        response = await client.responses.create(
+            model=settings.model,
+            instructions=SYSTEM_PROMPT,
+            previous_response_id=response.id,
+            input=outputs,
+            tools=_active_tools(all_tools, gated_tools, read_only_tools, metrics, plan_gated),
+        )
+        _record_response_usage(response, metrics)
+
+    raise RuntimeError(f"Agent exceeded AGENT_MAX_TURNS={settings.max_turns}.")
+
+
+async def _run_deepseek_stateless(
+    session: ClientSession,
+    client: AsyncOpenAI,
+    settings: Settings,
+    goal: str,
+    all_tools: list[dict[str, Any]],
+    gated_tools: list[dict[str, Any]],
+    read_only_tools: list[dict[str, Any]],
+    bootstrap: str,
+    metrics: RunMetrics,
+    tool_names: set[str],
+    plan_gated: bool,
+) -> str:
+    history: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": f"USER GOAL:\n{goal}\n\nEXISTING SAVE BOOTSTRAP:\n{bootstrap}",
+        }
+    ]
+
+    for _ in range(settings.max_turns):
+        response = await client.responses.create(
+            model=settings.model,
+            instructions=SYSTEM_PROMPT,
+            input=history,
+            tools=_active_tools(all_tools, gated_tools, read_only_tools, metrics, plan_gated),
+        )
+        _record_response_usage(response, metrics)
+
+        outputs = await _execute_function_calls(session, response, settings, metrics, tool_names, plan_gated)
+        if not outputs:
+            return response.output_text or "(model completed without text output)"
+
+        # DeepSeek Responses is stateless. Preserve assistant messages and function-call
+        # items explicitly, then append the matching function_call_output items.
+        for item in response.output:
+            if getattr(item, "type", None) in {"message", "function_call"}:
+                history.append(_dump_model(item))
+        history.extend(outputs)
+
+    raise RuntimeError(f"Agent exceeded AGENT_MAX_TURNS={settings.max_turns}.")
+
+
+async def run(
+    goal: str,
+    bootstrap_only: bool = False,
+    list_tools: bool = False,
+    plan_gated: bool = False,
+) -> int:
+    load_dotenv()
+    settings = Settings.from_env(require_cloud=not (bootstrap_only or list_tools))
+
+    if not settings.mcp_project.exists():
+        raise FileNotFoundError(
+            f"FactorioMCP project not found: {settings.mcp_project}. "
+            "Run scripts/bootstrap-factorio-mcp.ps1 first."
+        )
+
+    Path("state").mkdir(parents=True, exist_ok=True)
+
+    server = StdioServerParameters(
+        command="dotnet",
+        args=["run", "--project", str(settings.mcp_project), "--no-build"],
+        env=_mcp_env(settings),
+        cwd=str(settings.mcp_project.parent.parent),
+    )
+
+    async with stdio_client(server) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            visible_tools = [tool for tool in listed.tools if tool.name not in DANGEROUS_TOOL_NAMES]
+            tool_names = {tool.name for tool in visible_tools}
+
+            if list_tools:
+                names = set(tool_names)
+                if plan_gated:
+                    names.add(PLAN_TOOL_NAME)
+                for name in sorted(names):
+                    print(name)
+                return 0
+
+            if plan_gated and "check_entity_placement_batch" not in tool_names:
+                raise RuntimeError(
+                    "--plan-gated requires check_entity_placement_batch from the patched FactorioMCP. "
+                    "Run scripts/bootstrap-factorio-mcp.ps1 after pulling the latest branch."
+                )
+
+            bootstrap = await _bootstrap_existing_save(
+                session,
+                tool_names,
+                settings.tool_result_max_chars,
+            )
+
+            if bootstrap_only:
+                print(bootstrap)
+                return 0
+
+            mcp_tools = [_tool_schema(tool) for tool in visible_tools]
+            read_only_tools = [
+                tool for tool in mcp_tools if not _is_mutating_tool(str(tool.get("name", "")))
+            ]
+            all_tools = [*mcp_tools, PLAN_TOOL_SCHEMA] if plan_gated else mcp_tools
+            gated_tools = [*read_only_tools, PLAN_TOOL_SCHEMA] if plan_gated else read_only_tools
+            client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url)
+            metrics = RunMetrics(started_at=time.perf_counter())
+
+            print(
+                f"[cloud] provider={settings.provider} model={settings.model} base_url={settings.base_url}",
+                file=sys.stderr,
+            )
+            print(
+                f"[limits] max_turns={settings.max_turns} "
+                f"max_mutations={settings.max_mutations} "
+                f"max_failed_mutations={settings.max_failed_mutations}",
+                file=sys.stderr,
+            )
+            if plan_gated:
+                print(
+                    "[plan-gate] enabled; mutating tools remain hidden until submit_factory_plan returns PLAN_VALID",
+                    file=sys.stderr,
+                )
+
+            try:
+                if settings.provider == "openai":
+                    final_text = await _run_openai_stateful(
+                        session,
+                        client,
+                        settings,
+                        goal,
+                        all_tools,
+                        gated_tools,
+                        read_only_tools,
+                        bootstrap,
+                        metrics,
+                        tool_names,
+                        plan_gated,
+                    )
+                else:
+                    final_text = await _run_deepseek_stateless(
+                        session,
+                        client,
+                        settings,
+                        goal,
+                        all_tools,
+                        gated_tools,
+                        read_only_tools,
+                        bootstrap,
+                        metrics,
+                        tool_names,
+                        plan_gated,
+                    )
+
+                print(final_text)
+                return 0
+            finally:
+                if "emergency_stop" in tool_names:
+                    cleanup = await _call_tool(
+                        session,
+                        "emergency_stop",
+                        {},
+                        settings.tool_result_max_chars,
+                    )
+                    print(f"[cleanup] emergency_stop -> {cleanup[:300]}", file=sys.stderr)
+                _print_metrics(metrics)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Cloud AI orchestrator for FactorioMCP")
+    parser.add_argument("goal", nargs="?", default="Inspect the existing save and report its current state.")
+    parser.add_argument(
+        "--bootstrap-only",
+        action="store_true",
+        help="Connect to FactorioMCP, print existing-save bootstrap state, and do not call a cloud model.",
+    )
+    parser.add_argument(
+        "--list-tools",
+        action="store_true",
+        help="List the MCP tools exposed to the cloud model and exit.",
+    )
+    parser.add_argument(
+        "--plan-gated",
+        action="store_true",
+        help=(
+            "Start with mutating tools hidden. The model must submit a structured factory plan that passes deterministic "
+            "validation before world-changing tools are exposed. Intended for large factory expansion/build tasks."
+        ),
+    )
+    return parser.parse_args()
+
+
+def _iter_leaf_exceptions(exc: BaseException):
+    if isinstance(exc, BaseExceptionGroup):
+        for child in exc.exceptions:
+            yield from _iter_leaf_exceptions(child)
+    else:
+        yield exc
+
+
+def _print_exception(exc: BaseException) -> None:
+    print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+    leaves = list(_iter_leaf_exceptions(exc))
+    if len(leaves) == 1 and leaves[0] is exc:
+        return
+
+    print("Nested exception details:", file=sys.stderr)
+    for index, leaf in enumerate(leaves, start=1):
+        print(f"  [{index}] {type(leaf).__name__}: {leaf}", file=sys.stderr)
+        status_code = getattr(leaf, "status_code", None)
+        if status_code is not None:
+            print(f"      HTTP status: {status_code}", file=sys.stderr)
+        body = getattr(leaf, "body", None)
+        if body:
+            try:
+                rendered = json.dumps(body, ensure_ascii=False)
+            except TypeError:
+                rendered = str(body)
+            print(f"      body: {rendered}", file=sys.stderr)
+
+
+def main() -> None:
+    args = _parse_args()
+    try:
+        raise SystemExit(asyncio.run(run(args.goal, args.bootstrap_only, args.list_tools, args.plan_gated)))
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception as exc:
+        _print_exception(exc)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
