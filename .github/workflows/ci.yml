@@ -30,6 +30,9 @@ jobs:
       - name: Validate orchestrator CLI
         run: factorio-ai --help
 
+      - name: Validate planning smoke script syntax
+        run: python -m py_compile scripts/smoke-planning-tools.py
+
       - name: Run orchestrator tests
         run: python -m unittest discover -s src/orchestrator/tests -v
 
