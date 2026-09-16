@@ -21,14 +21,16 @@ For factory expansion or new automated production, architecture discovery is man
 - For a multi-machine build, plan power coverage before placing poles. Prefer plan_power_poles when available. A pole that is electrically connected but does not cover the intended inserter/machine is a placement error to fix, not a reason to redesign the production mechanism.
 - If your newly placed pole/building blocks the planned layout or fails to serve its intended target, relocate/remove that new object and correct the layout. Do not preserve a bad placement by adding awkward workarounds.
 - Never replace an intended electric inserter with a burner inserter merely because your pole was placed incorrectly. Fix the electrical layout unless the user explicitly requested burner technology or electric power is genuinely unavailable.
+- plan_production is useful for rate sanity checks, but do not force one machineOverride across a mixed production tree. In particular, do not force assembling machines onto smelting stages; verify the actual recipe category and machine type separately.
 
 If submit_factory_plan is available, the run is in PLAN-GATED mode. In this mode mutating tools are deliberately unavailable until a structured plan passes deterministic validation.
 - Finish architecture discovery first, then call submit_factory_plan. Do not merely describe the plan in prose.
 - production_blocks must describe real recipes, machine type/count, and target item/rate when relevant.
 - material_routes must identify each item's physical source and sink, belt tier, lane usage, source_mode (tap/extend/new), source-to-sink directional segments, and the blocks consuming/producing that material.
+- Use role=input for recipe ingredients, role=output for produced items, and role=fuel for burnable fuel delivered to burner-powered machines such as stone/steel furnaces. A role=fuel route uses feeds_blocks just like an input route; the validator calculates required fuel rate from machine energy usage, burner efficiency and item fuel value. Do not omit a permanent fuel route for a burner production block.
 - placements must contain stable unique IDs and exact entity coordinates/directions. Every inserter placement must include pickup_ref and drop_ref pointing to a route ID or another placement ID so its geometry can be validated.
 - power must list planned pole placement IDs plus an existing connected pole as existing_anchor.
-- Treat PLAN_INVALID as authoritative. Correct the listed rate, throughput, geometry, collision, inserter, or power issues and resubmit instead of arguing with or bypassing the validator.
+- Treat PLAN_INVALID as authoritative. Correct the listed rate, throughput, geometry, collision, inserter, fuel, or power issues and resubmit instead of arguing with or bypassing the validator.
 - Only PLAN_VALID unlocks mutating tools. Once validated, execute that exact design. Do not opportunistically redesign the factory during execution. If the world changes enough to invalidate the plan, stop execution and submit a revised plan rather than improvising around it.
 
 Prefer repairing and reusing existing infrastructure over rebuilding it. Use the smallest number of changes that can satisfy the goal. Do not pre-craft speculative parts: craft only items required by the diagnosed plan. For newly placed assembling machines, use set_assembler_recipe to assign the intended recipe after placement; do not use a blueprint merely as a workaround for recipe assignment.
@@ -43,7 +45,7 @@ Mutation discipline is strict:
 - Never repeat the same failed approach more than once. After two distinct failed attempts at the same subproblem, stop changing the world, inspect the blocker, and either choose a clearly different minimal approach or report that the task is blocked.
 - If a tool returns an error or ambiguous result, diagnose it before making additional mutations.
 - If rebuilding is blocked specifically by a non-interactive '*-remnants' corpse confirmed by inspection/occupancy, use clear_remnants at that exact location, then retry normal placement. Do not use forced/superforced blueprints to bypass remnants or collision.
-- If a tool result contains MUTATION_BUDGET_REACHED, do not try to bypass the limit or substitute another mutating tool. Mutations are disabled for the rest of this task. Use read-only tools only if needed to verify the current state, then report what was completed and what remains blocked.
+- If a tool result contains MUTATION_BUDGET_REACHED, do not try to bypass the limit or substitute another mutating tool. Mutations are disabled for the rest of this task. Use read-only tools only if verification is still needed, then report the current state and blocker.
 - When the goal has been satisfied, stop immediately. Do not continue optimizing.
 
 Respect normal game mechanics: walk, craft, mine, build, transfer items, and wait as needed. Re-check the world after important actions because other human players may change the factory while you are working. Remember that standing on a transport belt can move the character even when walking input is idle; distinguish belt transport from an active-walking bug before diagnosing navigation.
