@@ -13,9 +13,9 @@ PLAN_TOOL_SCHEMA: dict[str, Any] = {
     "name": PLAN_TOOL_NAME,
     "description": (
         "Submit a structured factory expansion plan for deterministic validation before any world-changing tools are unlocked. "
-        "The validator checks recipe/machine rates, belt and lane throughput, route direction/continuity, planned placement collisions, "
-        "live can-place feasibility, inserter pickup/drop geometry, and electric-pole coverage/connectivity. If validation fails, correct the "
-        "reported issues and resubmit. Do not mutate the world until this tool returns valid=true."
+        "The validator checks recipe/machine rates, belt and lane throughput including burner-fuel demand, route direction/continuity, "
+        "planned placement collisions, live can-place feasibility, inserter pickup/drop geometry, and electric-pole coverage/connectivity. "
+        "If validation fails, correct the reported issues and resubmit. Do not mutate the world until this tool returns valid=true."
     ),
     "parameters": {
         "type": "object",
@@ -45,7 +45,7 @@ PLAN_TOOL_SCHEMA: dict[str, Any] = {
                             "properties": {
                                 "id": {"type": "string"},
                                 "item": {"type": "string"},
-                                "role": {"type": "string", "enum": ["input", "output"]},
+                                "role": {"type": "string", "enum": ["input", "output", "fuel"]},
                                 "belt": {"type": "string"},
                                 "lane": {"type": "string", "enum": ["left", "right", "both"]},
                                 "source_mode": {"type": "string", "enum": ["tap", "extend", "new"]},
@@ -290,8 +290,10 @@ async def validate_factory_plan(
     block_ids: set[str] = set()
     block_input_rates: dict[tuple[str, str], float] = {}
     block_output_rates: dict[tuple[str, str], float] = {}
+    block_machine_meta: dict[str, dict[str, Any]] = {}
     block_summary: list[dict[str, Any]] = []
     prototype_cache: dict[str, dict[str, Any]] = {}
+    fuel_info_cache: dict[str, dict[str, Any]] = {}
 
     async def get_prototype(name: str) -> dict[str, Any] | None:
         if name in prototype_cache:
@@ -299,6 +301,16 @@ async def validate_factory_plan(
         payload = _parse_json_tool_output(await call_mcp("get_entity_prototype", {"entityName": name}))
         if payload is not None:
             prototype_cache[name] = payload
+        return payload
+
+    async def get_fuel_info(name: str) -> dict[str, Any] | None:
+        if name in fuel_info_cache:
+            return fuel_info_cache[name]
+        if "get_item_fuel_info" not in available_tool_names:
+            return None
+        payload = _parse_json_tool_output(await call_mcp("get_item_fuel_info", {"itemName": name}))
+        if payload is not None:
+            fuel_info_cache[name] = payload
         return payload
 
     for raw_block in blocks:
@@ -328,6 +340,24 @@ async def validate_factory_plan(
         if not prototype or prototype.get("success") is False:
             issue("prototype_lookup_failed", f"Could not read prototype {machine} for block {block_id}", block_id=block_id)
             continue
+
+        has_burner = prototype.get("has_burner") is True
+        burner_effectivity = _number(prototype.get("burner_effectivity"), 1.0)
+        if burner_effectivity <= 0:
+            burner_effectivity = 1.0
+        fuel_categories = {
+            str(value)
+            for value in (prototype.get("burner_fuel_categories") or [])
+            if str(value)
+        }
+        block_machine_meta[block_id] = {
+            "machine": machine,
+            "machine_count": machine_count,
+            "energy_usage_per_tick": _number(prototype.get("energy_usage")),
+            "has_burner": has_burner,
+            "burner_effectivity": burner_effectivity,
+            "burner_fuel_categories": fuel_categories,
+        }
 
         energy = _number(recipe.get("energy"))
         crafting_speed = _number(prototype.get("crafting_speed"))
@@ -376,12 +406,14 @@ async def validate_factory_plan(
                 "cycles_per_second": round(cycles_per_second, 6),
                 "target_item": target_item,
                 "actual_output_rate_per_second": round(actual_rate, 6),
+                "has_burner": has_burner,
             }
         )
 
     route_ids: set[str] = set()
     route_map: dict[str, dict[str, Any]] = {}
     route_summary: list[dict[str, Any]] = []
+    fuel_routed_blocks: set[str] = set()
     for route in routes:
         if not isinstance(route, dict):
             issue("invalid_route", "Every material route must be an object")
@@ -400,7 +432,7 @@ async def validate_factory_plan(
         source = _point(route.get("source"))
         sink = _point(route.get("sink"))
         segments = route.get("segments")
-        if not item or role not in {"input", "output"} or lane not in {"left", "right", "both"} or source_mode not in {"tap", "extend", "new"}:
+        if not item or role not in {"input", "output", "fuel"} or lane not in {"left", "right", "both"} or source_mode not in {"tap", "extend", "new"}:
             issue("invalid_route_fields", f"Route {route_id} has invalid item/role/lane/source_mode", route_id=route_id)
             continue
         if source is None or sink is None or not isinstance(segments, list) or not segments:
@@ -414,14 +446,65 @@ async def validate_factory_plan(
 
         required_rate = 0.0
         refs: list[str]
-        if role == "input":
+        if role in {"input", "fuel"}:
             refs = [str(v) for v in route.get("feeds_blocks", []) or []]
             if not refs:
-                issue("route_missing_consumers", f"Input route {route_id} must list feeds_blocks", route_id=route_id)
-            for block_id in refs:
-                if block_id not in block_ids:
-                    issue("unknown_route_block", f"Route {route_id} references unknown block {block_id}", route_id=route_id)
-                required_rate += block_input_rates.get((block_id, item), 0.0)
+                issue("route_missing_consumers", f"{role.capitalize()} route {route_id} must list feeds_blocks", route_id=route_id)
+            if role == "input":
+                for block_id in refs:
+                    if block_id not in block_ids:
+                        issue("unknown_route_block", f"Route {route_id} references unknown block {block_id}", route_id=route_id)
+                    required_rate += block_input_rates.get((block_id, item), 0.0)
+            else:
+                if "get_item_fuel_info" not in available_tool_names:
+                    issue(
+                        "validator_tool_missing",
+                        f"Fuel route {route_id} requires get_item_fuel_info from the patched FactorioMCP",
+                        route_id=route_id,
+                    )
+                fuel_info = await get_fuel_info(item)
+                fuel_value = 0.0 if not fuel_info else _number(fuel_info.get("fuel_value"))
+                fuel_category = "" if not fuel_info else str(fuel_info.get("fuel_category") or "")
+                if not fuel_info or fuel_info.get("success") is False or fuel_value <= 0:
+                    issue("invalid_fuel_item", f"Route {route_id} item {item} is not a usable fuel", route_id=route_id)
+                for block_id in refs:
+                    if block_id not in block_ids:
+                        issue("unknown_route_block", f"Route {route_id} references unknown block {block_id}", route_id=route_id)
+                        continue
+                    meta = block_machine_meta.get(block_id)
+                    if not meta:
+                        continue
+                    if not meta.get("has_burner"):
+                        issue(
+                            "fuel_route_to_non_burner_machine",
+                            f"Fuel route {route_id} feeds block {block_id}, but its machine is not burner-powered",
+                            route_id=route_id,
+                            block_id=block_id,
+                        )
+                        continue
+                    accepted_categories = meta.get("burner_fuel_categories") or set()
+                    if fuel_category and accepted_categories and fuel_category not in accepted_categories:
+                        issue(
+                            "fuel_category_mismatch",
+                            f"Fuel route {route_id} uses category {fuel_category}, not accepted by block {block_id}",
+                            route_id=route_id,
+                            block_id=block_id,
+                        )
+                        continue
+                    energy_usage_per_tick = _number(meta.get("energy_usage_per_tick"))
+                    if energy_usage_per_tick <= 0 or fuel_value <= 0:
+                        issue(
+                            "fuel_rate_unavailable",
+                            f"Cannot calculate fuel demand for block {block_id}: energy_usage={energy_usage_per_tick}, fuel_value={fuel_value}",
+                            route_id=route_id,
+                            block_id=block_id,
+                        )
+                        continue
+                    machine_count = int(meta.get("machine_count") or 0)
+                    effectivity = max(_number(meta.get("burner_effectivity"), 1.0), 1e-9)
+                    # Factorio runtime energy_usage is joules/tick; 60 ticks = one second.
+                    required_rate += machine_count * energy_usage_per_tick * 60.0 / (fuel_value * effectivity)
+                    fuel_routed_blocks.add(block_id)
         else:
             refs = [str(v) for v in route.get("source_blocks", []) or []]
             if not refs:
@@ -432,9 +515,10 @@ async def validate_factory_plan(
                 required_rate += block_output_rates.get((block_id, item), 0.0)
 
         if required_rate <= 0:
+            rate_kind = "fuel demand" if role == "fuel" else ("input" if role == "input" else "output")
             issue(
                 "route_has_no_matching_material_rate",
-                f"Route {route_id} carries {item} but referenced blocks have no matching {'input' if role == 'input' else 'output'} rate",
+                f"Route {route_id} carries {item} but referenced blocks have no matching {rate_kind} rate",
                 route_id=route_id,
             )
         elif required_rate > capacity + 1e-9:
@@ -520,6 +604,14 @@ async def validate_factory_plan(
                 "capacity_per_second": capacity,
             }
         )
+
+    for block_id, meta in block_machine_meta.items():
+        if meta.get("has_burner") and block_id not in fuel_routed_blocks:
+            issue(
+                "burner_block_missing_fuel_route",
+                f"Burner-powered production block {block_id} has no validated role=fuel material route",
+                block_id=block_id,
+            )
 
     placement_ids: set[str] = set()
     placement_map: dict[str, dict[str, Any]] = {}
