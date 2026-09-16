@@ -44,7 +44,29 @@ class PersistentPlanGateTests(unittest.TestCase):
         self.assertEqual(metrics.plan_validation_attempts, 4)
         self.assertTrue(_should_force_plan_continue(True, metrics, self.store, 0))
 
-    def test_valid_plan_or_retry_cap_allows_completion(self):
+    def test_persisted_valid_plan_still_requires_fresh_validation(self):
+        self.store.save_plan_checkpoint(
+            7,
+            {"production_blocks": [{"id": "ammo"}], "placements": []},
+            {
+                "status": "PLAN_VALID",
+                "issue_count": 0,
+                "warning_count": 0,
+                "issues": [],
+                "warnings": [],
+            },
+        )
+        metrics = self._metrics()
+        _checkpoint_for_run(self.store, metrics, True)
+
+        self.assertFalse(metrics.plan_validated)
+        self.assertTrue(_should_force_plan_continue(True, metrics, self.store, 0))
+
+        setattr(metrics, "_fresh_plan_validation_seen", True)
+        metrics.plan_validated = True
+        self.assertFalse(_should_force_plan_continue(True, metrics, self.store, 0))
+
+    def test_retry_cap_allows_completion(self):
         self.store.save_plan_checkpoint(
             2,
             {"production_blocks": [{"id": "ammo"}], "placements": []},
@@ -67,9 +89,6 @@ class PersistentPlanGateTests(unittest.TestCase):
                 MAX_FORCED_PLAN_CONTINUATIONS,
             )
         )
-
-        metrics.plan_validated = True
-        self.assertFalse(_should_force_plan_continue(True, metrics, self.store, 0))
 
     def test_normal_non_gated_run_is_never_forced(self):
         metrics = self._metrics()
