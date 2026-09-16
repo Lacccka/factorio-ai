@@ -13,7 +13,7 @@ from .planning import PLAN_TOOL_NAME
 _ORIGINAL_EXECUTE_FUNCTION_CALLS = base._execute_function_calls
 _RUN_STORES: dict[int, PersistentRunState] = {}
 MAX_FORCED_PLAN_CONTINUATIONS = 4
-PLAN_GATE_CONTINUE_PROMPT = """PLAN_GATE_INCOMPLETE: You attempted to finish this run while the latest structured factory plan is still PLAN_INVALID. Do not summarize or stop yet. Continue from the current plan/checkpoint, fix the remaining validator issues, and call submit_factory_plan again. Use narrow read-only checks only when needed for the listed issues; do not restart broad architecture discovery. Continue until PLAN_VALID or until a genuine external/runtime blocker makes validation impossible."""
+PLAN_GATE_CONTINUE_PROMPT = """PLAN_GATE_INCOMPLETE: You attempted to finish this run before obtaining a fresh PLAN_VALID in the current process. Continue from the current plan/checkpoint instead of summarizing or stopping. If the stored/latest plan is PLAN_INVALID, fix only the remaining validator issues and call submit_factory_plan again. If a persisted checkpoint was PLAN_VALID, resubmit that exact stored plan once for fresh live validation before any mutation. Use narrow read-only checks only when needed; do not restart broad architecture discovery. Continue until fresh PLAN_VALID or until a genuine external/runtime blocker makes validation impossible."""
 
 
 def _arguments(item: Any) -> dict[str, Any]:
@@ -50,6 +50,7 @@ def _checkpoint_for_run(store: PersistentRunState, metrics: base.RunMetrics, pla
     # This is only informational state. A persisted PLAN_VALID never unlocks mutations;
     # the current process must submit it again and pass fresh live validation.
     setattr(metrics, "_latest_plan_validation", checkpoint)
+    setattr(metrics, "_fresh_plan_validation_seen", False)
     return checkpoint
 
 
@@ -94,7 +95,16 @@ def _should_force_plan_continue(
     validation = getattr(metrics, "_latest_plan_validation", None)
     if not isinstance(validation, dict):
         _, validation = store.plan_checkpoint_context()
-    if not isinstance(validation, dict) or validation.get("status") != "PLAN_INVALID":
+    if not isinstance(validation, dict):
+        return False
+
+    status = validation.get("status")
+    fresh_seen = bool(getattr(metrics, "_fresh_plan_validation_seen", False))
+    if status == "PLAN_VALID":
+        # A PLAN_VALID loaded from disk is stale authorization. Force the model to submit it
+        # once in this process; the base validator will set metrics.plan_validated only then.
+        return not fresh_seen
+    if status != "PLAN_INVALID":
         return False
 
     try:
@@ -145,6 +155,7 @@ async def _execute_function_calls_persistent(
                 validation = None
             if isinstance(validation, dict) and validation.get("status") in {"PLAN_VALID", "PLAN_INVALID"}:
                 setattr(metrics, "_latest_plan_validation", validation)
+                setattr(metrics, "_fresh_plan_validation_seen", True)
                 store.save_plan_checkpoint(
                     metrics.plan_validation_attempts,
                     arguments.get("plan"),
