@@ -209,6 +209,33 @@ internal sealed class FactoryPlanningTools(FactorioService factorio, GameCommand
     }
 
     [McpServerTool, Description(
+        "Read an item prototype's fuel metadata for deterministic burner-machine planning. " +
+        "Returns fuel_value in joules and fuel_category. Read-only; does not change the world.")]
+    public Task<string> GetItemFuelInfo(
+        [Description("Item prototype name, for example 'coal' or 'solid-fuel'.")]
+        string itemName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(itemName);
+        var escapedName = itemName.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        var lua = string.Create(CultureInfo.InvariantCulture, $$"""
+            local function esc(s) return s:gsub('\\', '\\\\'):gsub('"', '\\"') end
+            local name = "{{escapedName}}"
+            local proto = prototypes.item[name]
+            if not proto then
+                rcon.print('{"success":false,"error":"unknown_item","item":"'..esc(name)..'"}')
+                return
+            end
+            local fuel_value = proto.fuel_value or 0
+            local fuel_category = proto.fuel_category
+            local category_json = fuel_category and ('"'..esc(fuel_category)..'"') or 'null'
+            rcon.print('{"success":true,"item":"'..esc(name)..'","fuel_value":'..fuel_value..',"fuel_category":'..category_json..'}')
+            """);
+
+        return queue.ExecuteAsync(nameof(GetItemFuelInfo), ct => factorio.ExecuteRawLuaAsync(lua, ct), cancellationToken);
+    }
+
+    [McpServerTool, Description(
         "Read-only batch preflight for planned entity placements. Uses Factorio surface.can_place_entity without creating ghosts or entities. " +
         "Input is a JSON array of {id,entity_name,x,y,direction}. Returns prototype existence and can_place for every entry. " +
         "Intended for deterministic validation before an autonomous agent is allowed to mutate the world.")]
