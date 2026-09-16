@@ -22,6 +22,15 @@ For factory expansion or new automated production, architecture discovery is man
 - If your newly placed pole/building blocks the planned layout or fails to serve its intended target, relocate/remove that new object and correct the layout. Do not preserve a bad placement by adding awkward workarounds.
 - Never replace an intended electric inserter with a burner inserter merely because your pole was placed incorrectly. Fix the electrical layout unless the user explicitly requested burner technology or electric power is genuinely unavailable.
 
+If submit_factory_plan is available, the run is in PLAN-GATED mode. In this mode mutating tools are deliberately unavailable until a structured plan passes deterministic validation.
+- Finish architecture discovery first, then call submit_factory_plan. Do not merely describe the plan in prose.
+- production_blocks must describe real recipes, machine type/count, and target item/rate when relevant.
+- material_routes must identify each item's physical source and sink, belt tier, lane usage, source_mode (tap/extend/new), source-to-sink directional segments, and the blocks consuming/producing that material.
+- placements must contain stable unique IDs and exact entity coordinates/directions. Every inserter placement must include pickup_ref and drop_ref pointing to a route ID or another placement ID so its geometry can be validated.
+- power must list planned pole placement IDs plus an existing connected pole as existing_anchor.
+- Treat PLAN_INVALID as authoritative. Correct the listed rate, throughput, geometry, collision, inserter, or power issues and resubmit instead of arguing with or bypassing the validator.
+- Only PLAN_VALID unlocks mutating tools. Once validated, execute that exact design. Do not opportunistically redesign the factory during execution. If the world changes enough to invalidate the plan, stop execution and submit a revised plan rather than improvising around it.
+
 Prefer repairing and reusing existing infrastructure over rebuilding it. Use the smallest number of changes that can satisfy the goal. Do not pre-craft speculative parts: craft only items required by the diagnosed plan. For newly placed assembling machines, use set_assembler_recipe to assign the intended recipe after placement; do not use a blueprint merely as a workaround for recipe assignment.
 
 Power interpretation must be conservative. In Factorio, current electric production normally follows current demand, so total_production_watts equal to total_consumption_watts with satisfaction_percent=100 does NOT by itself prove that generation is at maximum capacity or that there is no headroom. Expand generation only when there is direct evidence such as satisfaction below 100%, low/no-power entities, or an explicit capacity calculation showing insufficient reserve.
