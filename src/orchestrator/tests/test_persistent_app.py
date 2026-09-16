@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from factorio_ai import app as base
 from factorio_ai.persistence import PersistentRunState
@@ -13,7 +15,9 @@ from factorio_ai.persistent_app import (
     _active_tools_persistent,
     _checkpoint_for_run,
     _deepseek_history_input,
+    _openai_extra_body,
     _should_force_plan_continue,
+    _slim_live_bootstrap,
 )
 from factorio_ai.planning import PLAN_TOOL_NAME, PLAN_TOOL_SCHEMA
 
@@ -191,6 +195,41 @@ class PersistentPlanGateTests(unittest.TestCase):
                         for other in history[1:]
                     )
                 )
+
+    def test_warm_bootstrap_keeps_only_volatile_live_sections(self):
+        bootstrap = """### get_player_position
+{\"x\":1}
+
+### get_inventory_summary
+{\"iron\":2}
+
+### get_existing_factory_summary
+EXPENSIVE_FACTORY_SUMMARY
+
+### survey_factory_layout
+EXPENSIVE_LAYOUT
+
+### get_electric_network
+{\"satisfaction_percent\":100}"""
+
+        compact = _slim_live_bootstrap(bootstrap)
+
+        self.assertIn("get_player_position", compact)
+        self.assertIn("get_inventory_summary", compact)
+        self.assertIn("get_electric_network", compact)
+        self.assertNotIn("EXPENSIVE_FACTORY_SUMMARY", compact)
+        self.assertNotIn("EXPENSIVE_LAYOUT", compact)
+
+    def test_openai_requests_use_stable_cache_key_and_auto_compaction(self):
+        settings = SimpleNamespace(player_name="player-one", model="gpt-5.6-terra")
+        with patch.dict("os.environ", {"OPENAI_CONTEXT_COMPACT_TOKENS": "64000"}):
+            body = _openai_extra_body(settings, True)
+
+        self.assertTrue(str(body["prompt_cache_key"]).startswith("factorio-ai-"))
+        self.assertEqual(
+            body["context_management"],
+            [{"type": "compaction", "compact_threshold": 64000}],
+        )
 
 
 if __name__ == "__main__":
