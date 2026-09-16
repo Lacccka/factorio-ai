@@ -121,17 +121,81 @@ if ($flowService.Contains('from_e.unit_number..":"..to_e.unit_number')) {
 }
 Write-Utf8NoBom $flowServicePath $flowService
 
-# LuaEntityPrototype.max_health became get_max_health() in Factorio 2.0 runtime API.
-# The old property access makes get_entity_prototype fail before layout planning.
+# Harden the pinned entity-prototype query for Factorio 2.0. get_max_health() is
+# the replacement for max_health, and restricted prototype accessors such as
+# get_crafting_speed() must not be called blindly on inserters, poles, chests or
+# mining drills. pcall makes optional/restricted properties genuinely optional.
 $worldServicePath = Join-Path $Target "FactorioMCP/Services/FactorioService.World.cs"
-$worldService = [System.IO.File]::ReadAllText($worldServicePath)
+$worldService = [System.IO.File]::ReadAllText($worldServicePath).Replace("`r`n", "`n")
 $oldPrototypeHealth = "(proto.max_health or 0)"
 if (-not $worldService.Contains($oldPrototypeHealth)) {
     throw "Could not patch entity prototype max health: upstream prototype query changed."
 }
 $worldService = $worldService.Replace($oldPrototypeHealth, "proto.get_max_health()")
-if ($worldService.Contains("proto.max_health")) {
-    throw "Entity prototype patch incomplete: proto.max_health remains."
+
+$oldCraftingSpeedBlock = (@'
+            if proto.get_crafting_speed then
+                parts[#parts+1] = '"crafting_speed":'..proto.get_crafting_speed()
+            end
+'@).Replace("`r`n", "`n")
+$newCraftingSpeedBlock = (@'
+            local ok_crafting_speed, crafting_speed = pcall(function() return proto.get_crafting_speed() end)
+            if ok_crafting_speed and crafting_speed ~= nil then
+                parts[#parts+1] = '"crafting_speed":'..crafting_speed
+            end
+'@).Replace("`r`n", "`n")
+if (-not $worldService.Contains($oldCraftingSpeedBlock)) {
+    throw "Could not patch entity prototype crafting speed: upstream prototype query changed."
+}
+$worldService = $worldService.Replace($oldCraftingSpeedBlock, $newCraftingSpeedBlock)
+
+$oldMiningSpeedBlock = (@'
+            if proto.mining_speed then
+                parts[#parts+1] = '"mining_speed":'..proto.mining_speed
+            end
+'@).Replace("`r`n", "`n")
+$newMiningSpeedBlock = (@'
+            local ok_mining_speed, mining_speed = pcall(function() return proto.mining_speed end)
+            if ok_mining_speed and mining_speed ~= nil then
+                parts[#parts+1] = '"mining_speed":'..mining_speed
+            end
+'@).Replace("`r`n", "`n")
+if (-not $worldService.Contains($oldMiningSpeedBlock)) {
+    throw "Could not patch entity prototype mining speed: upstream prototype query changed."
+}
+$worldService = $worldService.Replace($oldMiningSpeedBlock, $newMiningSpeedBlock)
+
+$oldEnergyUsageBlock = (@'
+            if proto.energy_usage then
+                parts[#parts+1] = '"energy_usage":'..proto.energy_usage
+            end
+'@).Replace("`r`n", "`n")
+$newEnergyUsageBlock = (@'
+            local ok_energy_usage, energy_usage = pcall(function() return proto.energy_usage end)
+            if ok_energy_usage and energy_usage ~= nil then
+                parts[#parts+1] = '"energy_usage":'..energy_usage
+            end
+            local ok_burner, burner = pcall(function() return proto.burner_prototype end)
+            if ok_burner and burner then
+                parts[#parts+1] = '"has_burner":true'
+                parts[#parts+1] = '"burner_effectivity":'..(burner.effectivity or 1)
+                local categories = {}
+                for category, _ in pairs(burner.fuel_categories or {}) do categories[#categories+1] = category end
+                table.sort(categories)
+                local category_parts = {}
+                for _, category in ipairs(categories) do category_parts[#category_parts+1] = '"'..esc(category)..'"' end
+                parts[#parts+1] = '"burner_fuel_categories":['..table.concat(category_parts, ',')..']'
+            else
+                parts[#parts+1] = '"has_burner":false'
+            end
+'@).Replace("`r`n", "`n")
+if (-not $worldService.Contains($oldEnergyUsageBlock)) {
+    throw "Could not patch entity prototype energy source data: upstream prototype query changed."
+}
+$worldService = $worldService.Replace($oldEnergyUsageBlock, $newEnergyUsageBlock)
+
+if ($worldService.Contains("proto.max_health") -or $worldService.Contains("..proto.get_crafting_speed()")) {
+    throw "Entity prototype patch incomplete: unsafe Factorio 1.x/restricted prototype access remains."
 }
 Write-Utf8NoBom $worldServicePath $worldService
 
@@ -217,7 +281,7 @@ Write-Host "Patched $replacementCount player references."
 Write-Host "Installed structured factory-layout planning tool."
 Write-Host "Patched Factorio 2.0 power-topology wire traversal."
 Write-Host "Patched flow-graph fallback entity keys."
-Write-Host "Patched Factorio 2.0 entity prototype health query."
+Write-Host "Patched Factorio 2.0 entity prototype compatibility/query safety."
 Write-Host "Building FactorioMCP..."
 dotnet build (Join-Path $Target "FactorioMCP.sln")
 if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
