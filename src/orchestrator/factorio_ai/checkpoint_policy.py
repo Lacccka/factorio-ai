@@ -42,10 +42,11 @@ def _record_plan_execution_step_with_ownership(
     document = persistence._load_json(self.plan_path)
     if document.get("player_name") != self.player_name or document.get("goal_hash") != self.goal_hash:
         return
-    execution = document.get("execution")
-    if not isinstance(execution, dict):
-        return
-    owned = execution.get("owned_additive")
+
+    # Keep this ledger at the document top level. plan_checkpoint_context intentionally
+    # does not expose it to the model, so hundreds of belt placements do not bloat prompt
+    # context. It is purely a local authorization record for safe undo/rotate operations.
+    owned = document.get("owned_additive")
     if not isinstance(owned, dict):
         owned = {}
 
@@ -62,8 +63,7 @@ def _record_plan_execution_step_with_ownership(
         owned.pop(key, None)
     # rotate_entity keeps ownership unchanged.
 
-    execution["owned_additive"] = owned
-    document["execution"] = execution
+    document["owned_additive"] = owned
     persistence._write_json(self.plan_path, document)
 
 
