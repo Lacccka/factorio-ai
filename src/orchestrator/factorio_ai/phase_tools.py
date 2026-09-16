@@ -26,6 +26,7 @@ _PLANNING_TOOLS = {
     "get_entity_prototype",
     "get_recipe_details",
     "calculate_production_rate",
+    "plan_production",
     "get_item_fuel_info",
     "trace_item_flow",
     "get_flow_graph",
@@ -35,6 +36,13 @@ _PLANNING_TOOLS = {
     "count_item_in_world",
     "check_craft_feasibility",
     "find_idle_machines",
+}
+
+_WAIT_TOOLS = {
+    "wait",
+    "wait_for_condition",
+    "wait_for_inventory",
+    "wait_for_research",
 }
 
 _VERIFY_TOOLS = {
@@ -54,7 +62,7 @@ _VERIFY_TOOLS = {
     "find_idle_machines",
     "check_entity_placement_batch",
     "emergency_stop",
-}
+} | _WAIT_TOOLS
 
 _EXECUTION_READ_ONLY_TOOLS = _VERIFY_TOOLS | {
     "get_recipe_details",
@@ -70,7 +78,7 @@ _EXECUTION_EXACT_TOOLS = {
     "walk_to_position",
     "safe_walk_to_position",
     "emergency_stop",
-}
+} | _WAIT_TOOLS
 
 _EXECUTION_MUTATION_PREFIXES = (
     "place_",
