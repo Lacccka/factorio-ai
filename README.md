@@ -11,6 +11,7 @@ The project uses [FactorioMCP](https://github.com/sbarisic/FactorioMCP) as the g
 - a startup prompt that assumes the save may already contain research, machines, logistics and other player-built infrastructure;
 - hard mutation/failure budgets to stop tool thrashing;
 - optional plan-gated factory expansion: mutating tools stay hidden until a structured plan passes deterministic validation;
+- persistent factory knowledge and exact-goal plan checkpoints across CLI restarts;
 - per-run tool/token/timing metrics;
 - dangerous raw Lua hidden from the cloud model by default.
 
@@ -137,6 +138,12 @@ py -m venv .venv
 pip install -e ./src/orchestrator
 ```
 
+Re-run the editable install after pulling a revision that changes the console-script entry point or package metadata:
+
+```powershell
+pip install -e ./src/orchestrator
+```
+
 ## 5. Run
 
 ```powershell
@@ -173,6 +180,21 @@ To verify the patched read-only preflight tool after bootstrap:
 ```powershell
 factorio-ai --list-tools | Select-String "survey_factory_layout|check_entity_placement_batch"
 ```
+
+### Persistent knowledge and plan resume
+
+The orchestrator keeps two local, git-ignored checkpoint files under `state/`:
+
+```text
+state/factory_knowledge.json
+state/active_factory_plan.json
+```
+
+`factory_knowledge.json` stores bounded successful observations from architecture-oriented read-only tools such as `survey_factory_layout`, `scan_resources`, `get_power_network_topology`, `find_buildable_area`, and `summarize_area`. On a later run for the same configured Factorio player, these observations are injected as cached knowledge so the model can reuse an already-discovered main bus, assembler district, resource area and power layout instead of repeating broad surveys. Successful world mutations are timestamped so older observations are treated as potentially stale and only affected local facts should be revalidated.
+
+`active_factory_plan.json` stores the latest structured plan, validation result and up to the most recent execution mutation steps. A checkpoint is automatically resumed only when the normalized user goal is exactly the same and the configured Factorio player matches. `PLAN_INVALID` runs therefore resume from the last plan and remaining issues rather than planning from zero. A plan that was `PLAN_VALID` in a previous process is still re-submitted for fresh live validation before mutating tools are unlocked, because another player or a prior partial execution may have changed the world.
+
+These files deliberately remain local and are excluded by `state/.gitignore`; they may contain detailed coordinates and local factory state.
 
 ## Cloudflare Worker
 
