@@ -8,6 +8,8 @@ from typing import Any
 # Import resilient_app first so all existing persistence/resume hardening is installed.
 from . import resilient_app as resilient  # noqa: F401
 from . import app as base
+from . import world_model as world_model_module
+from .mutation_policy import classify_mutation_domains
 from .persistence import PersistentRunState
 from .phase_tools import filter_tools_for_phase, phase_for
 from .world_model import SemanticWorldModel
@@ -18,6 +20,11 @@ _ORIGINAL_MARK_WORLD_MUTATION = PersistentRunState.mark_world_mutation
 _ORIGINAL_FACTORY_CONTEXT = PersistentRunState.factory_context
 _PRIOR_ACTIVE_TOOLS = base._active_tools
 _PROMPT_MARKER = "SEMANTIC WORLD MODEL POLICY"
+
+# SemanticWorldModel.record_mutation resolves this function from its module at runtime.
+# Keep the compatibility implementation in world_model.py, but install the stricter policy
+# here so inventory-only actions cannot stale physical architecture facts.
+world_model_module.mutation_domains = classify_mutation_domains
 
 
 def _knowledge_document(store: PersistentRunState) -> dict[str, Any]:
