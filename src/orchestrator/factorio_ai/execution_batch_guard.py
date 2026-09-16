@@ -75,7 +75,11 @@ def _extend_execution_turn_budget(settings: base.Settings, metrics: base.RunMetr
     except (TypeError, ValueError):
         extra = _DEFAULT_EXTRA_TURNS
     if extra:
-        settings.max_turns += extra
+        # Settings is intentionally a frozen dataclass. This is a process-local runtime
+        # allowance that must be visible to the already-running persistent loop, so use
+        # object.__setattr__ explicitly instead of ordinary assignment (which raises
+        # FrozenInstanceError after PLAN_VALID).
+        object.__setattr__(settings, "max_turns", int(settings.max_turns) + extra)
         print(
             f"[execution-budget] added exact-plan execution turns={extra}; max_turns={settings.max_turns}",
             file=sys.stderr,
