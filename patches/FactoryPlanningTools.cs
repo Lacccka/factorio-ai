@@ -2,11 +2,13 @@ using FactorioMCP.Services;
 using ModelContextProtocol.Server;
 using System.ComponentModel;
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
 
 namespace FactorioMCP.Tools;
 
 /// <summary>
-/// Read-only planning helpers for understanding an existing factory layout before building.
+/// Read-only planning helpers for understanding and validating an existing factory layout before building.
 /// </summary>
 [McpServerToolType]
 internal sealed class FactoryPlanningTools(FactorioService factorio, GameCommandQueue queue)
@@ -204,5 +206,97 @@ internal sealed class FactoryPlanningTools(FactorioService factorio, GameCommand
             """);
 
         return queue.ExecuteAsync(nameof(SurveyFactoryLayout), ct => factorio.ExecuteRawLuaAsync(lua, ct), cancellationToken);
+    }
+
+    [McpServerTool, Description(
+        "Read-only batch preflight for planned entity placements. Uses Factorio surface.can_place_entity without creating ghosts or entities. " +
+        "Input is a JSON array of {id,entity_name,x,y,direction}. Returns prototype existence and can_place for every entry. " +
+        "Intended for deterministic validation before an autonomous agent is allowed to mutate the world.")]
+    public Task<string> CheckEntityPlacementBatch(
+        [Description("JSON array of planned placements: [{\"id\":\"asm-1\",\"entity_name\":\"assembling-machine-2\",\"x\":3.5,\"y\":-196.5,\"direction\":\"north\"}]")]
+        string placementsJson,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(placementsJson);
+
+        using var document = JsonDocument.Parse(placementsJson);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+            throw new ArgumentException("placementsJson must be a JSON array.", nameof(placementsJson));
+        if (document.RootElement.GetArrayLength() > 500)
+            throw new ArgumentOutOfRangeException(nameof(placementsJson), "At most 500 placements can be checked at once.");
+
+        static string LuaEscape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        var entries = new StringBuilder();
+        var allowedDirections = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"
+        };
+
+        foreach (var element in document.RootElement.EnumerateArray())
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new ArgumentException("Every placement must be a JSON object.", nameof(placementsJson));
+
+            var id = element.TryGetProperty("id", out var idElement) ? idElement.GetString() ?? "" : "";
+            var entityName = element.TryGetProperty("entity_name", out var nameElement) ? nameElement.GetString() ?? "" : "";
+            if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(entityName))
+                throw new ArgumentException("Every placement requires non-empty id and entity_name.", nameof(placementsJson));
+            if (!element.TryGetProperty("x", out var xElement) || !xElement.TryGetDouble(out var x) ||
+                !element.TryGetProperty("y", out var yElement) || !yElement.TryGetDouble(out var y))
+                throw new ArgumentException($"Placement '{id}' requires numeric x and y.", nameof(placementsJson));
+
+            var direction = element.TryGetProperty("direction", out var directionElement)
+                ? directionElement.GetString() ?? "north"
+                : "north";
+            if (!allowedDirections.Contains(direction))
+                throw new ArgumentException($"Placement '{id}' has unsupported direction '{direction}'.", nameof(placementsJson));
+
+            if (entries.Length > 0) entries.Append(',');
+            entries.Append("{id=\"").Append(LuaEscape(id)).Append("\",name=\"").Append(LuaEscape(entityName))
+                .Append("\",x=").Append(x.ToString("R", CultureInfo.InvariantCulture))
+                .Append(",y=").Append(y.ToString("R", CultureInfo.InvariantCulture))
+                .Append(",direction=\"").Append(direction.ToLowerInvariant()).Append("\"}");
+        }
+
+        var lua = """
+            local function esc(s) return s:gsub('\\', '\\\\'):gsub('"', '\\"') end
+            local p = game.get_player(storage.factorio_mcp_player_name)
+            if not p then error("Configured Factorio player does not exist") end
+            local surface = p.surface
+            local placements = { __PLACEMENTS__ }
+            local results = {}
+            local blocked = 0
+            for _, placement in ipairs(placements) do
+                local proto = prototypes.entity[placement.name]
+                local direction = defines.direction[placement.direction]
+                local exists = proto ~= nil
+                local can_place = false
+                local error_message = nil
+                if exists and direction then
+                    local ok, result = pcall(function()
+                        return surface.can_place_entity{
+                            name=placement.name,
+                            position={placement.x, placement.y},
+                            force=p.force,
+                            direction=direction
+                        }
+                    end)
+                    if ok then
+                        can_place = result == true
+                    else
+                        error_message = tostring(result)
+                    end
+                else
+                    if not exists then error_message = "unknown_prototype" else error_message = "invalid_direction" end
+                end
+                if not can_place then blocked = blocked + 1 end
+                local part = '{"id":"'..esc(placement.id)..'","entity_name":"'..esc(placement.name)..'","x":'..placement.x..',"y":'..placement.y..',"direction":"'..esc(placement.direction)..'","prototype_exists":'..tostring(exists)..',"can_place":'..tostring(can_place)
+                if error_message then part = part..',"error":"'..esc(error_message)..'"' end
+                results[#results+1] = part..'}'
+            end
+            rcon.print('{"success":true,"checked_count":'..#placements..',"blocked_count":'..blocked..',"results":['..table.concat(results, ',')..']}')
+            """.Replace("__PLACEMENTS__", entries.ToString());
+
+        return queue.ExecuteAsync(nameof(CheckEntityPlacementBatch), ct => factorio.ExecuteRawLuaAsync(lua, ct), cancellationToken);
     }
 }
