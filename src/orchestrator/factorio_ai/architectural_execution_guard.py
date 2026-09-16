@@ -143,8 +143,8 @@ def _architectural_mutation_authorized(
     # path anywhere inside a generous envelope around that route.
     if entity_name in _BELT_ENTITIES:
         if _inside_material_route_envelope(plan, entity_name, x, y):
-            return True, "additive logistics placement inside the validated route work area"
-        return False, "additive logistics placement is outside the validated route work area"
+            return True, "local additive logistics placement inside the validated route work area"
+        return False, "local additive logistics placement is outside the validated route work area"
 
     # Pole coordinates are execution geometry as long as the validated pole type and
     # production/power work area are preserved.
@@ -154,8 +154,8 @@ def _architectural_mutation_authorized(
         if entity_name != planned_type:
             return False, "electric-pole type differs from the validated power architecture"
         if _inside_envelope(_power_points(plan), x, y, _POWER_ENVELOPE_MARGIN):
-            return True, "additive pole placement inside the validated power work area"
-        return False, "additive pole placement is outside the validated power work area"
+            return True, "local additive pole placement inside the validated power work area"
+        return False, "local additive pole placement is outside the validated power work area"
 
     return False, reason
 
