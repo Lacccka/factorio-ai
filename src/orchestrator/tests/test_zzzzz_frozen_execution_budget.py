@@ -6,7 +6,7 @@ from unittest.mock import patch
 import unittest
 
 from factorio_ai import app as base
-from factorio_ai import execution_batch_guard as guard
+from factorio_ai import execution_budget_guard as guard
 
 
 class FrozenExecutionBudgetTests(unittest.TestCase):
