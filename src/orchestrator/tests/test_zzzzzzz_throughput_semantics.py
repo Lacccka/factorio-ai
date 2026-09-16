@@ -88,8 +88,9 @@ class DesignThroughputSemanticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(block["capacity_output_rate_per_second"], 1.5, places=6)
         self.assertAlmostEqual(block["planned_output_rate_per_second"], 0.15, places=6)
         self.assertAlmostEqual(block["design_utilization"], 0.1, places=6)
+        self.assertTrue(result["valid"], result)
 
-    async def test_large_furnace_block_no_longer_forces_full_load_and_warns_about_overbuild(self):
+    async def test_large_furnace_block_scales_flow_but_is_rejected_as_machine_overbuild(self):
         plan = {
             "production_blocks": [
                 {
@@ -185,8 +186,9 @@ class DesignThroughputSemanticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(routes["stone-in"]["required_rate_per_second"], 1.5, places=6)
         self.assertAlmostEqual(routes["brick-out"]["required_rate_per_second"], 0.75, places=6)
         self.assertAlmostEqual(routes["coal-in"]["required_rate_per_second"], 0.027, places=6)
-        warning = next(w for w in result["warnings"] if w["code"] == "production_capacity_headroom")
-        self.assertEqual(warning["minimum_machine_count"], 2)
+        issue = next(i for i in result["issues"] if i["code"] == "machine_count_exceeds_design_requirement")
+        self.assertEqual(issue["minimum_machine_count"], 2)
+        self.assertFalse(result["valid"])
 
 
 if __name__ == "__main__":
