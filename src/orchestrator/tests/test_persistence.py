@@ -99,7 +99,13 @@ class PersistentRunStateTests(unittest.TestCase):
         _, checkpoint = self.store.plan_checkpoint_context()
         self.assertIsNotNone(checkpoint)
         self.assertTrue(checkpoint["execution"]["started"])
-        self.assertEqual(checkpoint["execution"]["mutation_count"], 1)
+        # Runtime checkpoint context intentionally labels this as historical progress so
+        # a fresh process never mistakes it for consumption of the new run's safety budget.
+        count = checkpoint["execution"].get(
+            "historical_mutation_count",
+            checkpoint["execution"].get("mutation_count"),
+        )
+        self.assertEqual(count, 1)
         self.assertEqual(checkpoint["execution"]["last_step"]["tool"], "place_entity")
 
 
