@@ -114,7 +114,8 @@ async def _execute_function_calls_persistent(
             store.record_observation(name, arguments, tool_output)
             continue
 
-        failed = base._is_tool_failure(tool_output)
+        blocked = tool_output.lstrip().startswith("MUTATION_BUDGET_REACHED:")
+        failed = blocked or base._is_tool_failure(tool_output)
         if not failed:
             store.mark_world_mutation(name, arguments)
         if plan_gated and metrics.plan_validated:
