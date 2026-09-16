@@ -16,8 +16,11 @@ PERSISTENT_KNOWLEDGE_TOOLS = {
 }
 
 MAX_OBSERVATIONS = 24
-MAX_OBSERVATION_CHARS = 16_000
-MAX_FACTORY_CONTEXT_CHARS = 36_000
+MAX_OBSERVATION_CHARS = 12_000
+MAX_FACTORY_CONTEXT_CHARS = 18_000
+MAX_CONTEXT_OBSERVATIONS = 8
+MAX_CONTEXT_OBSERVATIONS_PER_TOOL = 2
+MAX_RECENT_MUTATIONS = 12
 MAX_PLAN_CONTEXT_CHARS = 80_000
 
 
@@ -70,12 +73,33 @@ def _observation_key(tool_name: str, arguments: dict[str, Any]) -> str:
     return hashlib.sha256(f"{tool_name}\n{rendered}".encode("utf-8")).hexdigest()[:20]
 
 
+def _knowledge_document(player_name: str, document: dict[str, Any]) -> dict[str, Any]:
+    if document.get("player_name") == player_name:
+        document.setdefault("version", 2)
+        document.setdefault("world_revision", 0)
+        document.setdefault("observations", [])
+        document.setdefault("recent_mutations", [])
+        return document
+    return {
+        "version": 2,
+        "player_name": player_name,
+        "world_revision": 0,
+        "observations": [],
+        "recent_mutations": [],
+    }
+
+
 class PersistentRunState:
     """Disk-backed knowledge and plan checkpointing for cloud-agent restarts.
 
     The files live under the existing local ``state/`` directory, which is git-ignored.
     Knowledge is scoped by configured Factorio player and plan checkpoints additionally
     require an exact normalized goal match before being injected into a later run.
+
+    Persistent observations are intentionally not a chat transcript. They are bounded
+    world facts produced by trusted read-only MCP tools. Successful mutations advance a
+    monotonically increasing local world revision and retain a short mutation journal so
+    later runs can revalidate only the areas that could actually have changed.
     """
 
     def __init__(self, state_dir: Path, player_name: str, goal: str) -> None:
@@ -90,14 +114,7 @@ class PersistentRunState:
         if tool_name not in PERSISTENT_KNOWLEDGE_TOOLS or not _is_successful_tool_output(output):
             return
 
-        document = _load_json(self.knowledge_path)
-        if document.get("player_name") != self.player_name:
-            document = {
-                "version": 1,
-                "player_name": self.player_name,
-                "observations": [],
-            }
-
+        document = _knowledge_document(self.player_name, _load_json(self.knowledge_path))
         observations = document.get("observations")
         if not isinstance(observations, list):
             observations = []
@@ -109,6 +126,7 @@ class PersistentRunState:
             "tool": tool_name,
             "arguments": arguments,
             "observed_at": _utc_now(),
+            "world_revision": int(document.get("world_revision", 0) or 0),
             "output": clipped_output,
             "truncated": len(output) > len(clipped_output),
         }
@@ -118,7 +136,7 @@ class PersistentRunState:
 
         document.update(
             {
-                "version": 1,
+                "version": 2,
                 "player_name": self.player_name,
                 "updated_at": _utc_now(),
                 "observations": observations,
@@ -127,20 +145,35 @@ class PersistentRunState:
         _write_json(self.knowledge_path, document)
 
     def mark_world_mutation(self, tool_name: str, arguments: dict[str, Any]) -> None:
-        document = _load_json(self.knowledge_path)
-        if document.get("player_name") != self.player_name:
-            document = {
-                "version": 1,
-                "player_name": self.player_name,
-                "observations": [],
-            }
-        document["last_world_mutation"] = {
+        document = _knowledge_document(self.player_name, _load_json(self.knowledge_path))
+        revision = int(document.get("world_revision", 0) or 0) + 1
+        mutation = {
+            "revision": revision,
             "at": _utc_now(),
             "tool": tool_name,
             "arguments": arguments,
         }
-        document["updated_at"] = _utc_now()
+        recent_mutations = document.get("recent_mutations")
+        if not isinstance(recent_mutations, list):
+            recent_mutations = []
+        recent_mutations.append(mutation)
+
+        document.update(
+            {
+                "version": 2,
+                "world_revision": revision,
+                "last_world_mutation": mutation,
+                "recent_mutations": recent_mutations[-MAX_RECENT_MUTATIONS:],
+                "updated_at": _utc_now(),
+            }
+        )
         _write_json(self.knowledge_path, document)
+
+    def has_factory_knowledge(self) -> bool:
+        document = _load_json(self.knowledge_path)
+        if document.get("player_name") != self.player_name:
+            return False
+        return any(isinstance(item, dict) for item in document.get("observations", []))
 
     def factory_context(self) -> tuple[str, int]:
         document = _load_json(self.knowledge_path)
@@ -150,32 +183,44 @@ class PersistentRunState:
         if not observations:
             return "", 0
 
-        # Newest observations first. Keep the context deliberately bounded; the complete
-        # history stays on disk while only the most useful recent facts enter the LLM context.
-        selected: list[dict[str, Any]] = []
+        # Keep only a small working set in the prompt. The complete bounded observation
+        # history remains on disk. We retain at most two scopes from the same broad tool so
+        # one repeatedly queried subsystem cannot crowd the entire world memory out.
+        selected_newest_first: list[dict[str, Any]] = []
+        per_tool: dict[str, int] = {}
         used = 0
         for item in reversed(observations):
-            rendered = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-            if selected and used + len(rendered) > MAX_FACTORY_CONTEXT_CHARS:
+            tool = str(item.get("tool", ""))
+            if per_tool.get(tool, 0) >= MAX_CONTEXT_OBSERVATIONS_PER_TOOL:
                 continue
-            selected.append(item)
+            rendered = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            if selected_newest_first and used + len(rendered) > MAX_FACTORY_CONTEXT_CHARS:
+                continue
+            selected_newest_first.append(item)
+            per_tool[tool] = per_tool.get(tool, 0) + 1
             used += len(rendered)
-            if used >= MAX_FACTORY_CONTEXT_CHARS:
+            if len(selected_newest_first) >= MAX_CONTEXT_OBSERVATIONS or used >= MAX_FACTORY_CONTEXT_CHARS:
                 break
-        selected.reverse()
+        selected = list(reversed(selected_newest_first))
 
+        recent_mutations = [
+            item
+            for item in document.get("recent_mutations", [])
+            if isinstance(item, dict)
+        ][-MAX_RECENT_MUTATIONS:]
         payload = {
             "player_name": self.player_name,
-            "last_world_mutation": document.get("last_world_mutation"),
+            "world_revision": int(document.get("world_revision", 0) or 0),
+            "recent_mutations": recent_mutations,
             "observations": selected,
         }
         text = (
             "PERSISTENT FACTORY KNOWLEDGE FROM EARLIER RUNS:\n"
-            "Reuse these observations instead of rediscovering unchanged architecture. "
-            "They are cached observations, not immutable truth: if an observation predates last_world_mutation "
-            "or the current task depends on an exact changed tile/entity, revalidate only the affected local facts. "
-            "Do not repeat broad surveys merely to reconfirm an unchanged main bus, resource area, assembler district, "
-            "or power topology.\n"
+            "Reuse these trusted MCP observations instead of rediscovering unchanged architecture. "
+            "world_revision increases after successful AI world mutations. An older observation is not globally invalid merely "
+            "because its revision is lower: compare the recent mutation journal and revalidate only when a mutation could affect "
+            "that observation's area/subsystem, or when the current task needs exact live tile/entity state. Do not repeat broad "
+            "surveys merely to reconfirm an unchanged main bus, resource area, assembler district, build area, or power topology.\n"
             + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         )
         return text, len(selected)
