@@ -37,6 +37,11 @@ world_model._TOOL_SECTIONS.update(
     }
 )
 
+# Install the strict PLAN_VALID execution contract after all persistence/resume seams are
+# in place. This makes exact planned removals and two-tile splitter tap geometry part of
+# validation, then blocks any world mutation that tries to improvise beyond that plan.
+from . import plan_execution_guard as plan_execution_guard  # noqa: E402,F401
+
 
 def main() -> None:
     base.main()
