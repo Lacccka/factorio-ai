@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import traceback
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -62,6 +63,12 @@ async def main() -> int:
     attempt = int(checkpoint.get("validation_attempt") or 0)
     plan = checkpoint["plan"]
 
+    print(
+        f"checkpoint loaded: status={checkpoint.get('status', '?')} "
+        f"attempt={attempt} player={settings.player_name}"
+    )
+    print(f"starting FactorioMCP: {settings.mcp_project}")
+
     server = StdioServerParameters(
         command="dotnet",
         args=["run", "--project", str(settings.mcp_project), "--no-build"],
@@ -74,6 +81,7 @@ async def main() -> int:
             await session.initialize()
             listed = await session.list_tools()
             tool_names = {tool.name for tool in listed.tools}
+            print(f"FactorioMCP connected: tools={len(tool_names)}")
 
             async def call_mcp(name: str, arguments: dict) -> str:
                 return await _call_tool(session, name, arguments, settings.tool_result_max_chars)
@@ -114,4 +122,9 @@ if __name__ == "__main__":
         raise SystemExit(130)
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        # ExceptionGroup is common when an MCP stdio subprocess dies during startup or
+        # shutdown. Printing the full traceback preserves the nested root cause (for
+        # example missing build output, RCON failure, or server initialization error)
+        # instead of collapsing it to the unhelpful top-level TaskGroup message.
+        traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
         raise SystemExit(1)
