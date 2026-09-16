@@ -212,7 +212,7 @@ class PlanPolicyRevisionTests(unittest.IsolatedAsyncioTestCase):
             raw = persistence._load_json(store.plan_path)
             self.assertEqual(raw["plan_policy_revision"], policy.CURRENT_PLAN_POLICY_REVISION)
             self.assertEqual(raw["status"], "PLAN_INVALID")
-            self.assertEqual(raw["issues"][0]["code"], "planning_policy_revision_changed")
+            self.assertEqual(raw["issues"][0]["code"], "planning_rate_policy_revision_changed")
             self.assertFalse(metrics.plan_validated)
 
     def test_checkpoint_resubmit_preserves_ai_owned_additive_ledger(self):
