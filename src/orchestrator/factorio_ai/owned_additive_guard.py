@@ -69,13 +69,24 @@ def _owned_additive_entity(metrics: base.RunMetrics, arguments: dict[str, Any]) 
     except Exception:
         return None
     execution = document.get("execution") if isinstance(document, dict) else None
-    steps = execution.get("steps") if isinstance(execution, dict) else None
-    if not isinstance(steps, list):
+    if not isinstance(execution, dict):
         return None
 
-    # Look at the newest successful action at this coordinate. A successful placement of
-    # an additive entity establishes ownership; a later successful mine removes it. Rotate
-    # keeps ownership. This never grants permission over pre-existing factory entities.
+    # New checkpoints keep a durable ownership ledger so an additive route can be corrected
+    # even after its placement falls out of the bounded execution-step history.
+    owned = execution.get("owned_additive")
+    if isinstance(owned, dict):
+        key = f"{x:.3f},{y:.3f}"
+        entry = owned.get(key)
+        if isinstance(entry, dict):
+            entity_name = str(entry.get("entity_name", ""))
+            if entity_name in _OWNABLE_ENTITIES:
+                return entity_name
+
+    # Backward compatibility for checkpoints created before the ownership ledger existed.
+    steps = execution.get("steps")
+    if not isinstance(steps, list):
+        return None
     for step in reversed(steps):
         if not isinstance(step, dict) or step.get("failed") is True:
             continue
@@ -94,7 +105,6 @@ def _owned_additive_entity(metrics: base.RunMetrics, arguments: dict[str, Any]) 
             )
             return entity_name if entity_name in _OWNABLE_ENTITIES else None
         if tool == "rotate_entity":
-            # Keep searching for the placement that established ownership.
             continue
         return None
     return None
@@ -152,5 +162,5 @@ base._execute_function_calls = _execute_function_calls_owned_additive
 base.SYSTEM_PROMPT += """
 
 OWN-PLACEMENT CORRECTION:
-You may mine or rotate an additive belt/underground-belt/electric-pole only when the runtime can prove that this AI placed that exact entity during the current persisted plan execution. This exists so you can correct your own routing mistakes. It never grants permission to rotate or remove pre-existing factory infrastructure.
+You may mine or rotate an additive belt/underground-belt/electric-pole only when the runtime can prove that this AI placed that exact entity during the persisted plan execution. This exists so you can correct your own routing mistakes. It never grants permission to rotate or remove pre-existing factory infrastructure.
 """
