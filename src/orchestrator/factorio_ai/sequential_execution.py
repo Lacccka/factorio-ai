@@ -43,7 +43,17 @@ def _is_out_of_range(outputs: list[dict[str, Any]]) -> bool:
 def _mutation_failed(outputs: list[dict[str, Any]]) -> bool:
     if not outputs:
         return True
-    return any(base._is_tool_failure(_output_text(item)) for item in outputs)
+    hard_prefixes = (
+        "PLAN_EXECUTION_BLOCKED:",
+        "MUTATION_BUDGET_REACHED:",
+        "PLACEMENT_RANGE_RECOVERY_FAILED:",
+        "EXECUTION_DEFERRED:",
+    )
+    for item in outputs:
+        text = _output_text(item).lstrip()
+        if text.startswith(hard_prefixes) or base._is_tool_failure(text):
+            return True
+    return False
 
 
 def _range_target(arguments: dict[str, Any]) -> tuple[float, float] | None:
@@ -178,7 +188,8 @@ async def _execute_function_calls_sequentially(
             if isinstance(payload, dict):
                 stop_reason = str(payload.get("error") or payload.get("status") or "mutation failure")
             else:
-                stop_reason = "mutation failure"
+                first_text = _output_text(current[0]).strip() if current else ""
+                stop_reason = first_text.split(":", 1)[0] or "mutation failure"
 
     return outputs
 
@@ -189,5 +200,5 @@ if _PROMPT_MARKER not in base.SYSTEM_PROMPT:
     base.SYSTEM_PROMPT += """
 
 SEQUENTIAL LIVE EXECUTION:
-You may request several nearby additive placements in one turn, but treat them as a hypothesis about the live geometry. The runtime automatically handles pure out_of_range placement misses by walking near the exact target and retrying. If a real placement collision or other mutation failure occurs, later mutations from that same response are deferred so you can observe the obstacle and reason before building past it. Do not pre-generate a second disconnected route beyond a failed tile.
+You may request several nearby additive placements in one turn, but treat them as a hypothesis about the live geometry. The runtime automatically handles pure out_of_range placement misses by walking near the exact target and retrying. If a real placement collision, policy failure, movement failure, or other mutation failure occurs, later mutations from that same response are deferred so you can observe the obstacle and reason before building past it. Do not pre-generate a second disconnected route beyond a failed tile.
 """
