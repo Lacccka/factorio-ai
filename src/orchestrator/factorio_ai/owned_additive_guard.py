@@ -68,22 +68,33 @@ def _owned_additive_entity(metrics: base.RunMetrics, arguments: dict[str, Any]) 
         document = json.loads(store.plan_path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    execution = document.get("execution") if isinstance(document, dict) else None
-    if not isinstance(execution, dict):
-        return None
 
-    # New checkpoints keep a durable ownership ledger so an additive route can be corrected
-    # even after its placement falls out of the bounded execution-step history.
-    owned = execution.get("owned_additive")
+    # New checkpoints keep a private top-level ownership ledger so authorization survives
+    # the bounded execution history without injecting hundreds of belt coordinates into
+    # the model context.
+    owned = document.get("owned_additive") if isinstance(document, dict) else None
     if isinstance(owned, dict):
-        key = f"{x:.3f},{y:.3f}"
-        entry = owned.get(key)
+        entry = owned.get(f"{x:.3f},{y:.3f}")
         if isinstance(entry, dict):
             entity_name = str(entry.get("entity_name", ""))
             if entity_name in _OWNABLE_ENTITIES:
                 return entity_name
 
-    # Backward compatibility for checkpoints created before the ownership ledger existed.
+    execution = document.get("execution") if isinstance(document, dict) else None
+    if not isinstance(execution, dict):
+        return None
+
+    # Transitional compatibility with a briefly used nested ownership ledger.
+    nested_owned = execution.get("owned_additive")
+    if isinstance(nested_owned, dict):
+        entry = nested_owned.get(f"{x:.3f},{y:.3f}")
+        if isinstance(entry, dict):
+            entity_name = str(entry.get("entity_name", ""))
+            if entity_name in _OWNABLE_ENTITIES:
+                return entity_name
+
+    # Backward compatibility for older checkpoints: recover ownership when the placement
+    # is still present in the recent bounded execution-step history.
     steps = execution.get("steps")
     if not isinstance(steps, list):
         return None
