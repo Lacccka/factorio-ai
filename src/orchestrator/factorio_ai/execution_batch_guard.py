@@ -12,7 +12,7 @@ from . import plan_execution_guard as guard
 
 _PRIOR_EXECUTE_FUNCTION_CALLS = base._execute_function_calls
 _LOW_LEVEL_EXECUTE_FUNCTION_CALLS = guard._PRIOR_EXECUTE_FUNCTION_CALLS
-_PROMPT_MARKER = "EXACT PLAN BATCH EXECUTION POLICY"
+_PROMPT_MARKER = "ADDITIVE BATCH EXECUTION POLICY"
 _DEFAULT_EXTRA_TURNS = 40
 
 
@@ -57,7 +57,7 @@ def _batch_authorized(plan: dict[str, Any], arguments: dict[str, Any]) -> tuple[
     if not targets:
         return False, "place_entity_multiple must contain a non-empty decodable target list"
     if len(targets) > 64:
-        return False, "place_entity_multiple is limited to 64 exact planned targets per call"
+        return False, "place_entity_multiple is limited to 64 plan-authorized additive targets per call"
     for index, target in enumerate(targets):
         normalized = _normalize_place_target(target)
         allowed, reason = guard._mutation_authorized("place_entity", normalized, plan)
@@ -77,11 +77,10 @@ def _extend_execution_turn_budget(settings: base.Settings, metrics: base.RunMetr
     if extra:
         # Settings is intentionally a frozen dataclass. This is a process-local runtime
         # allowance that must be visible to the already-running persistent loop, so use
-        # object.__setattr__ explicitly instead of ordinary assignment (which raises
-        # FrozenInstanceError after PLAN_VALID).
+        # object.__setattr__ explicitly instead of ordinary assignment.
         object.__setattr__(settings, "max_turns", int(settings.max_turns) + extra)
         print(
-            f"[execution-budget] added exact-plan execution turns={extra}; max_turns={settings.max_turns}",
+            f"[execution-budget] added execution turns={extra}; max_turns={settings.max_turns}",
             file=sys.stderr,
         )
     setattr(metrics, "_execution_turn_budget_extended", True)
@@ -146,7 +145,7 @@ async def _execute_function_calls_exact_batch(
             tool_output = (
                 "PLAN_EXECUTION_BLOCKED: "
                 + reason
-                + ". Batch placement is only allowed when every target exactly belongs to the validated plan."
+                + ". Batch placement is only allowed when every target is authorized by the current architectural plan policy."
             )
             print(f"[plan-exec] blocked place_entity_multiple: {reason}", file=sys.stderr)
             outputs.append(
@@ -158,9 +157,9 @@ async def _execute_function_calls_exact_batch(
             )
             continue
 
-        # Additive exact-plan placement is safe to batch even if FactorioMCP reports a
-        # partial failure: every successful target is authorized and idempotent resume can
-        # reconcile it. Destructive *_multiple operations remain blocked by the inner guard.
+        # Additive plan-authorized placement is safe to batch even if FactorioMCP reports
+        # a partial failure: successful targets can be reconciled on resume. Destructive
+        # *_multiple operations remain blocked by the inner guard.
         outputs.extend(
             await _LOW_LEVEL_EXECUTE_FUNCTION_CALLS(
                 session,
@@ -179,6 +178,6 @@ base._execute_function_calls = _execute_function_calls_exact_batch
 if _PROMPT_MARKER not in base.SYSTEM_PROMPT:
     base.SYSTEM_PROMPT += """
 
-EXACT PLAN BATCH EXECUTION POLICY:
-After PLAN_VALID, execution is mechanical. Do not repeatedly inspect each successful placement. If place_entity_multiple is available, use it for small spatially local batches of exact validated placements or ordinary route-belt tiles; every target must already belong to the validated plan. Destructive batch mutations such as mine_entity_multiple remain forbidden. For out_of_range, walk near the next local cluster and retry the same planned work. Reserve inspections for genuine failures and the final verification phase.
+ADDITIVE BATCH EXECUTION POLICY:
+After PLAN_VALID, stay goal-directed rather than blindly replaying coordinates. Use place_entity_multiple for small spatially local batches when the placements are already authorized by the current plan policy. If a local obstacle appears, inspect that obstacle and adapt the additive route locally instead of retrying impossible coordinates or restarting global planning. Destructive batch mutations such as mine_entity_multiple remain forbidden. For out_of_range, move near the next local cluster and retry only the still-needed authorized work. Reserve broad inspection for genuine architectural uncertainty and final verification.
 """
