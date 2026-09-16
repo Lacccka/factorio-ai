@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from factorio_ai import app as base
 from factorio_ai import survey_app
+from factorio_ai.world_model import semantic_snapshot
 
 
 class SurveyOnlyRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -42,6 +44,43 @@ class SurveyOnlyRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("craft", names)
         self.assertNotIn("ensure_item", names)
         self.assertNotIn("submit_factory_plan", names)
+
+    def test_targeted_flow_discovery_is_semantic_world_memory(self):
+        snapshot = semantic_snapshot(
+            "trace_item_flow",
+            json.dumps(
+                {
+                    "status": "ok",
+                    "start_name": "stone-furnace",
+                    "start_x": 99.0,
+                    "start_y": -15.0,
+                    "node_count": 4,
+                    "nodes": [
+                        {
+                            "name": "stone-furnace",
+                            "type": "furnace",
+                            "x": 99.0,
+                            "y": -15.0,
+                            "recipe": "stone-brick",
+                        },
+                        {
+                            "name": "transport-belt",
+                            "type": "transport-belt",
+                            "x": 99.5,
+                            "y": -17.5,
+                        },
+                    ],
+                    "edges": [],
+                }
+            ),
+        )
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        section, domains, facts = snapshot
+        self.assertEqual(section, "architecture")
+        self.assertIn("logistics", domains)
+        self.assertIn("production", domains)
+        self.assertIn("stone-brick", json.dumps(facts))
 
     async def test_hallucinated_mutation_is_blocked_before_dispatch(self):
         metrics = base.RunMetrics(started_at=0.0)
