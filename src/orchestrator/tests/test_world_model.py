@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from factorio_ai.world_model import SemanticWorldModel, mutation_domains, semantic_snapshot
+from factorio_ai.mutation_policy import classify_mutation_domains
+from factorio_ai.world_model import SemanticWorldModel, semantic_snapshot
 
 
 class SemanticWorldModelTests(unittest.TestCase):
@@ -82,7 +83,7 @@ class SemanticWorldModelTests(unittest.TestCase):
         self.assertTrue(self.world.observe("survey_factory_layout", {"radius": 60}, survey, 3))
 
         # Inventory-only crafting does not invalidate the physical bus architecture.
-        self.world.record_mutation("craft", {"item": "transport-belt", "count": 10}, 4)
+        self.world.record_mutation("craft", {"item": "iron-gear-wheel", "count": 10}, 4)
         context, count = self.world.context()
         self.assertEqual(count, 1)
         self.assertNotIn("may_be_affected_by", context)
@@ -147,9 +148,12 @@ class SemanticWorldModelTests(unittest.TestCase):
         self.assertIn("build_areas", context)
         self.assertIn('"x":44', context)
 
-    def test_mutation_domain_classification_is_local(self):
-        self.assertEqual(mutation_domains("craft", {"item": "iron-gear-wheel"}), {"inventory"})
-        domains = mutation_domains(
+    def test_runtime_mutation_policy_is_local(self):
+        self.assertEqual(
+            classify_mutation_domains("craft", {"item": "transport-belt"}),
+            {"inventory"},
+        )
+        domains = classify_mutation_domains(
             "place_entity",
             {"entityName": "medium-electric-pole", "x": 1, "y": 2},
         )
