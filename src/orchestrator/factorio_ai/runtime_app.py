@@ -21,6 +21,22 @@ world_model.MAX_CONTEXT_ENTRIES_PER_SECTION = max(
 )
 world_model.MAX_CONTEXT_CHARS = max(world_model.MAX_CONTEXT_CHARS, 28_000)
 
+# Whole-base surveys learn important facts through targeted tools after broad regional
+# scans. Persist those results into the same durable semantic sections so a later goal
+# does not lose facts such as an off-bus stone-brick source merely because the recipe was
+# confirmed by trace_item_flow rather than survey_factory_layout.
+world_model._TOOL_SECTIONS.update(
+    {
+        "trace_item_flow": ("architecture", {"logistics", "production"}),
+        "get_existing_factory_summary": (
+            "architecture",
+            {"geometry", "logistics", "production", "power"},
+        ),
+        "count_item_in_world": ("areas", {"inventory", "logistics", "production"}),
+        "get_electric_network": ("power", {"power"}),
+    }
+)
+
 
 def main() -> None:
     base.main()
