@@ -15,6 +15,11 @@ from .planning import PLAN_TOOL_NAME
 _PRIOR_ACTIVE_TOOLS = base._active_tools
 _PRIOR_EXECUTE_FUNCTION_CALLS = base._execute_function_calls
 _SURVEY_PROMPT_MARKER = "FULL BASE SURVEY MODE"
+_SURVEY_BLOCKED_TOOL_NAMES = {PLAN_TOOL_NAME, "ensure_item"}
+
+
+def _survey_tool_blocked(name: str) -> bool:
+    return name in _SURVEY_BLOCKED_TOOL_NAMES or base._is_mutating_tool(name)
 
 
 def _survey_active_tools(
@@ -34,8 +39,7 @@ def _survey_active_tools(
     return [
         tool
         for tool in tools
-        if str(tool.get("name", "")) != PLAN_TOOL_NAME
-        and not base._is_mutating_tool(str(tool.get("name", "")))
+        if not _survey_tool_blocked(str(tool.get("name", "")))
     ]
 
 
@@ -54,7 +58,7 @@ async def _execute_function_calls_survey_only(
         if getattr(item, "type", None) != "function_call":
             continue
         name = str(getattr(item, "name", ""))
-        if name == PLAN_TOOL_NAME or base._is_mutating_tool(name):
+        if _survey_tool_blocked(name):
             metrics.tool_calls += 1
             metrics.blocked_mutations += 1
             print(f"[survey-only] blocked {name}", file=sys.stderr)
@@ -64,7 +68,7 @@ async def _execute_function_calls_survey_only(
                     "call_id": item.call_id,
                     "output": (
                         "SURVEY_ONLY_TOOL_BLOCKED: this run is strictly read-only. "
-                        "Map and inspect the existing factory; do not mutate it or submit a build plan."
+                        "Map and inspect the existing factory; do not mutate it, provision inventory, or submit a build plan."
                     ),
                 }
             )
@@ -91,7 +95,7 @@ if _SURVEY_PROMPT_MARKER not in base.SYSTEM_PROMPT:
     base.SYSTEM_PROMPT += """
 
 FULL BASE SURVEY MODE:
-This process is a read-only cartography pass over an existing developed Factorio save. Do not craft, mine, place, rotate, transfer, insert/remove, change recipes/research, submit a factory build plan, or otherwise modify the world. Navigation is allowed only to get within inspection range.
+This process is a read-only cartography pass over an existing developed Factorio save. Do not craft, ensure/provision inventory, mine, place, rotate, transfer, insert/remove, change recipes/research, submit a factory build plan, or otherwise modify the world. Navigation is allowed only to get within inspection range.
 
 Build a durable mental/semantic atlas of the whole industrial base rather than solving one local production problem. Start from compact global summaries, infer the occupied industrial extent, then inspect the base systematically in overlapping regions until all major districts and long-lived trunks are covered. Do not treat one empty local scan, an empty MCP building-memory result, or absence from the main bus as proof that a production chain does not exist elsewhere.
 
