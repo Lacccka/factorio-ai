@@ -9,6 +9,10 @@ from factorio_ai.mutation_policy import classify_mutation_domains
 from factorio_ai.world_model import SemanticWorldModel, semantic_snapshot
 
 
+def _context_payload(context: str) -> dict:
+    return json.loads(context.splitlines()[-1])
+
+
 class SemanticWorldModelTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -86,7 +90,8 @@ class SemanticWorldModelTests(unittest.TestCase):
         self.world.record_mutation("craft", {"item": "iron-gear-wheel", "count": 10}, 4)
         context, count = self.world.context()
         self.assertEqual(count, 1)
-        self.assertNotIn("may_be_affected_by", context)
+        entry = _context_payload(context)["sections"]["architecture"][0]
+        self.assertNotIn("may_be_affected_by", entry)
 
         # A later belt placement intersects architecture/logistics domains.
         self.world.record_mutation(
@@ -96,9 +101,11 @@ class SemanticWorldModelTests(unittest.TestCase):
         )
         context, count = self.world.context()
         self.assertEqual(count, 1)
-        self.assertIn("may_be_affected_by", context)
-        self.assertIn("transport-belt", context)
-        self.assertIn('"x":12.5', context)
+        entry = _context_payload(context)["sections"]["architecture"][0]
+        self.assertIn("may_be_affected_by", entry)
+        rendered = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+        self.assertIn("transport-belt", rendered)
+        self.assertIn('"x":12.5', rendered)
 
     def test_power_mutation_does_not_invalidate_resource_patch(self):
         resources = json.dumps(
@@ -116,8 +123,9 @@ class SemanticWorldModelTests(unittest.TestCase):
             8,
         )
         context, _ = self.world.context()
-        self.assertIn("iron-ore", context)
-        self.assertNotIn("may_be_affected_by", context)
+        entry = _context_payload(context)["sections"]["resources"][0]
+        self.assertIn("iron-ore", json.dumps(entry))
+        self.assertNotIn("may_be_affected_by", entry)
 
     def test_legacy_observations_can_seed_semantic_memory(self):
         knowledge = {
