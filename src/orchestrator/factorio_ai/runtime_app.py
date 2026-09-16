@@ -57,8 +57,14 @@ from . import owned_additive_guard as owned_additive_guard  # noqa: E402,F401
 # builds a disconnected continuation past an unseen obstacle.
 from . import sequential_execution as sequential_execution  # noqa: E402,F401
 
-# Planning and execution have separate cloud-turn and mutation allowances. This module
-# changes budget only; it deliberately contains no execution strategy or coordinate policy.
+# Sol chooses route geometry; Python can execute only a model-selected straight corridor
+# after every tile has passed a no-mutation placement preflight. This removes per-tile cloud
+# reasoning without returning to blind route replay.
+from . import clear_belt_segment as clear_belt_segment  # noqa: E402,F401
+
+# Planning and execution have separate cloud-turn and mutation allowances. Import this last
+# so the allowance is extended before any execution helper (including clear belt segments)
+# performs world mutations.
 from . import execution_budget_guard as execution_budget_guard  # noqa: E402,F401
 
 
