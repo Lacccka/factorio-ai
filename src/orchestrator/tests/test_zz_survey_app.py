@@ -9,7 +9,7 @@ from factorio_ai import survey_app
 
 
 class SurveyOnlyRuntimeTests(unittest.IsolatedAsyncioTestCase):
-    def test_active_tools_remove_mutations_and_plan_submission(self):
+    def test_active_tools_remove_mutations_inventory_provisioning_and_plan_submission(self):
         metrics = base.RunMetrics(started_at=0.0)
         tools = [
             {"type": "function", "name": "get_player_position", "parameters": {}},
@@ -17,6 +17,7 @@ class SurveyOnlyRuntimeTests(unittest.IsolatedAsyncioTestCase):
             {"type": "function", "name": "walk_to_position", "parameters": {}},
             {"type": "function", "name": "place_entity", "parameters": {}},
             {"type": "function", "name": "craft", "parameters": {}},
+            {"type": "function", "name": "ensure_item", "parameters": {}},
             {"type": "function", "name": "submit_factory_plan", "parameters": {}},
         ]
         read_only = [
@@ -39,6 +40,7 @@ class SurveyOnlyRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("walk_to_position", names)
         self.assertNotIn("place_entity", names)
         self.assertNotIn("craft", names)
+        self.assertNotIn("ensure_item", names)
         self.assertNotIn("submit_factory_plan", names)
 
     async def test_hallucinated_mutation_is_blocked_before_dispatch(self):
@@ -67,6 +69,39 @@ class SurveyOnlyRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 SimpleNamespace(),
                 metrics,
                 {"place_entity"},
+                False,
+            )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertTrue(outputs[0]["output"].startswith("SURVEY_ONLY_TOOL_BLOCKED:"))
+        self.assertEqual(metrics.blocked_mutations, 1)
+
+    async def test_ensure_item_is_blocked_before_dispatch(self):
+        metrics = base.RunMetrics(started_at=0.0)
+        response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="ensure_item",
+                    call_id="ensure-blocked",
+                    arguments='{"itemName":"transport-belt","count":1}',
+                )
+            ]
+        )
+
+        async def should_not_execute(*args, **kwargs):
+            raise AssertionError("survey-only inventory provisioning must never reach MCP")
+
+        with patch(
+            "factorio_ai.survey_app._PRIOR_EXECUTE_FUNCTION_CALLS",
+            should_not_execute,
+        ):
+            outputs = await survey_app._execute_function_calls_survey_only(
+                None,
+                response,
+                SimpleNamespace(),
+                metrics,
+                {"ensure_item"},
                 False,
             )
 
