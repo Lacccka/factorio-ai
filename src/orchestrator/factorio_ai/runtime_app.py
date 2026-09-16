@@ -47,10 +47,20 @@ from . import plan_execution_guard as plan_execution_guard  # noqa: E402,F401
 # approve a medium-pole hop that a small existing anchor cannot physically connect.
 from . import power_reach_guard as power_reach_guard  # noqa: E402,F401
 
+# Material-route segments are executable geometry too. Preflight every ordinary belt tile
+# so furnaces, poles, cliffs, etc. cannot hide inside a PLAN_VALID route merely because the
+# validator only checked explicit splitter/underground/inserter placements.
+from . import route_preflight_guard as route_preflight_guard  # noqa: E402,F401
+
 # Exact additive placements may be batched after PLAN_VALID, while destructive batch
 # mutations stay forbidden. Also give execution its own turn allowance so a successful
 # planning phase cannot consume the entire cloud-turn budget before mechanical build work.
 from . import execution_batch_guard as execution_batch_guard  # noqa: E402,F401
+
+# PLAN_VALID describes a snapshot, not an immutable universe. If an authorized placement
+# still hits a live collision during execution, revoke the stale plan, preserve completed
+# work, reopen a narrow repair phase and require a corrected PLAN_VALID before continuing.
+from . import adaptive_replan_guard as adaptive_replan_guard  # noqa: E402,F401
 
 
 def main() -> None:
