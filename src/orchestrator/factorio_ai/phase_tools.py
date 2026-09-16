@@ -36,6 +36,12 @@ _PLANNING_TOOLS = {
     "count_item_in_world",
     "check_craft_feasibility",
     "find_idle_machines",
+    "find_buildings_by_type",
+    "get_buildings_near",
+    "take_screenshot",
+    "walk_to_position",
+    "safe_walk_to_position",
+    "emergency_stop",
 }
 
 _WAIT_TOOLS = {
@@ -61,6 +67,7 @@ _VERIFY_TOOLS = {
     "count_item_in_world",
     "find_idle_machines",
     "check_entity_placement_batch",
+    "take_screenshot",
     "emergency_stop",
 } | _WAIT_TOOLS
 
