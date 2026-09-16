@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,7 +20,18 @@ MAX_FORCED_PLAN_CONTINUATIONS = 4
 RESUME_DIAGNOSTIC_TOOL_BUDGET = 8
 DEEPSEEK_HISTORY_MAX_GROUPS = 3
 DEEPSEEK_HISTORY_MAX_CHARS = 120_000
+OPENAI_CONTEXT_COMPACT_TOKENS_DEFAULT = 80_000
 PLAN_GATE_CONTINUE_PROMPT = """PLAN_GATE_INCOMPLETE: You attempted to finish this run before obtaining a fresh PLAN_VALID in the current process. Continue from the current plan/checkpoint instead of summarizing or stopping. If the stored/latest plan is PLAN_INVALID, fix only the remaining validator issues and call submit_factory_plan again. If a persisted checkpoint was PLAN_VALID, resubmit that exact stored plan once for fresh live validation before any mutation. Use narrow read-only checks only when needed; do not restart broad architecture discovery. Continue until fresh PLAN_VALID or until a genuine external/runtime blocker makes validation impossible."""
+
+# Once durable factory knowledge exists, repeat launches only need a small live heartbeat.
+# Architecture-sized sections are already available from factory_knowledge.json and can be
+# refreshed on demand when a task actually touches them.
+_WARM_BOOTSTRAP_TOOL_NAMES = {
+    "get_player_position",
+    "get_inventory_summary",
+    "get_research_status",
+    "get_electric_network",
+}
 
 
 # When an exact-goal checkpoint already exists, the expensive architecture-discovery phase
@@ -93,17 +107,36 @@ def _checkpoint_for_run(store: PersistentRunState, metrics: base.RunMetrics, pla
     return checkpoint
 
 
+def _slim_live_bootstrap(bootstrap: str) -> str:
+    """Keep only volatile live facts when durable factory knowledge is already warm."""
+    markers = list(re.finditer(r"(?m)^### ([^\n]+)\n", bootstrap))
+    if not markers:
+        return bootstrap
+
+    sections: list[str] = []
+    for index, match in enumerate(markers):
+        name = match.group(1).strip()
+        if name not in _WARM_BOOTSTRAP_TOOL_NAMES:
+            continue
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(bootstrap)
+        sections.append(bootstrap[match.start():end].strip())
+    return "\n\n".join(sections) if sections else bootstrap
+
+
 def _enrich_bootstrap(
     store: PersistentRunState,
     bootstrap: str,
     plan_gated: bool,
 ) -> str:
-    sections = [bootstrap]
     factory_context, observation_count = store.factory_context()
+    live_bootstrap = _slim_live_bootstrap(bootstrap) if factory_context else bootstrap
+    sections = [live_bootstrap]
     if factory_context:
         sections.append(factory_context)
+        saved_chars = max(0, len(bootstrap) - len(live_bootstrap))
         print(
-            f"[persistence] loaded factory knowledge observations={observation_count}",
+            f"[persistence] loaded compact factory knowledge observations={observation_count} "
+            f"bootstrap_chars_saved={saved_chars}",
             file=sys.stderr,
         )
 
@@ -120,6 +153,36 @@ def _enrich_bootstrap(
             )
 
     return "\n\n".join(section for section in sections if section)
+
+
+def _openai_prompt_cache_key(settings: base.Settings, plan_gated: bool) -> str:
+    # Deliberately omit the goal: the expensive system/tool prefix is shared across goals
+    # in the same Factorio world. Hash the player name rather than exposing it in routing metadata.
+    material = f"factorio-ai-v2\n{settings.player_name}\n{settings.model}\nplan_gated={plan_gated}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    return f"factorio-ai-{digest}"
+
+
+def _openai_extra_body(settings: base.Settings, plan_gated: bool) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "prompt_cache_key": _openai_prompt_cache_key(settings, plan_gated),
+    }
+    raw_threshold = os.getenv(
+        "OPENAI_CONTEXT_COMPACT_TOKENS",
+        str(OPENAI_CONTEXT_COMPACT_TOKENS_DEFAULT),
+    ).strip()
+    try:
+        threshold = int(raw_threshold)
+    except (TypeError, ValueError):
+        threshold = OPENAI_CONTEXT_COMPACT_TOKENS_DEFAULT
+    if threshold > 0:
+        body["context_management"] = [
+            {
+                "type": "compaction",
+                "compact_threshold": threshold,
+            }
+        ]
+    return body
 
 
 def _resume_allowed_tool_names(validation: dict[str, Any] | None) -> set[str]:
@@ -259,6 +322,13 @@ def _deepseek_history_input(
     return result
 
 
+def _response_has_function_calls(response: Any) -> bool:
+    return any(
+        getattr(item, "type", None) == "function_call"
+        for item in getattr(response, "output", []) or []
+    )
+
+
 async def _execute_function_calls_persistent(
     session: Any,
     response: Any,
@@ -348,19 +418,30 @@ async def _run_openai_stateful_persistent(
     _checkpoint_for_run(store, metrics, plan_gated)
     enriched_bootstrap = _enrich_bootstrap(store, bootstrap, plan_gated)
     initial_input = f"USER GOAL:\n{goal}\n\nEXISTING SAVE BOOTSTRAP:\n{enriched_bootstrap}"
+    extra_body = _openai_extra_body(settings, plan_gated)
     response = await client.responses.create(
         model=settings.model,
         instructions=base.SYSTEM_PROMPT,
         input=initial_input,
         tools=base._active_tools(all_tools, gated_tools, read_only_tools, metrics, plan_gated),
+        extra_body=extra_body,
     )
     base._record_response_usage(response, metrics)
     forced_count = 0
+    followups_created = 0
 
-    for _ in range(settings.max_turns):
+    while True:
+        # A tool call is only useful if there is budget for the response that consumes its
+        # result. This also fixes the old off-by-one behavior that could create and bill a
+        # final answer and then discard it at the turn boundary.
+        if _response_has_function_calls(response) and followups_created >= settings.max_turns:
+            raise RuntimeError(f"Agent exceeded AGENT_MAX_TURNS={settings.max_turns}.")
+
         outputs = await base._execute_function_calls(session, response, settings, metrics, tool_names, plan_gated)
         if not outputs:
             if _should_force_plan_continue(plan_gated, metrics, store, forced_count):
+                if followups_created >= settings.max_turns:
+                    raise RuntimeError(f"Agent exceeded AGENT_MAX_TURNS={settings.max_turns}.")
                 forced_count += 1
                 print(
                     "[plan-gate] rejected premature model completion; "
@@ -373,8 +454,10 @@ async def _run_openai_stateful_persistent(
                     previous_response_id=response.id,
                     input=PLAN_GATE_CONTINUE_PROMPT,
                     tools=base._active_tools(all_tools, gated_tools, read_only_tools, metrics, plan_gated),
+                    extra_body=extra_body,
                 )
                 base._record_response_usage(response, metrics)
+                followups_created += 1
                 continue
 
             final_text = response.output_text or "(model completed without text output)"
@@ -387,10 +470,10 @@ async def _run_openai_stateful_persistent(
             previous_response_id=response.id,
             input=outputs,
             tools=base._active_tools(all_tools, gated_tools, read_only_tools, metrics, plan_gated),
+            extra_body=extra_body,
         )
         base._record_response_usage(response, metrics)
-
-    raise RuntimeError(f"Agent exceeded AGENT_MAX_TURNS={settings.max_turns}.")
+        followups_created += 1
 
 
 async def _run_deepseek_stateless_persistent(
