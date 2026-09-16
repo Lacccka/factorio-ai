@@ -14,7 +14,8 @@ dependencies = [
 ]
 
 [project.scripts]
-factorio-ai = "factorio_ai.optimized_app:main"
+factorio-ai = "factorio_ai.runtime_app:main"
+factorio-survey = "factorio_ai.survey_app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
