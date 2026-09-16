@@ -42,6 +42,16 @@ world_model._TOOL_SECTIONS.update(
 # validation, then blocks any world mutation that tries to improvise beyond that plan.
 from . import plan_execution_guard as plan_execution_guard  # noqa: E402,F401
 
+# Validate mixed pole chains using Factorio's actual shorter-end wire reach. The previous
+# geometric check used the new pole type's reach for the existing anchor as well, which can
+# approve a medium-pole hop that a small existing anchor cannot physically connect.
+from . import power_reach_guard as power_reach_guard  # noqa: E402,F401
+
+# Exact additive placements may be batched after PLAN_VALID, while destructive batch
+# mutations stay forbidden. Also give execution its own turn allowance so a successful
+# planning phase cannot consume the entire cloud-turn budget before mechanical build work.
+from . import execution_batch_guard as execution_batch_guard  # noqa: E402,F401
+
 
 def main() -> None:
     base.main()
