@@ -10,6 +10,7 @@ The project uses [FactorioMCP](https://github.com/sbarisic/FactorioMCP) as the g
 - DeepSeek directly through its API;
 - a startup prompt that assumes the save may already contain research, machines, logistics and other player-built infrastructure;
 - hard mutation/failure budgets to stop tool thrashing;
+- optional plan-gated factory expansion: mutating tools stay hidden until a structured plan passes deterministic validation;
 - per-run tool/token/timing metrics;
 - dangerous raw Lua hidden from the cloud model by default.
 
@@ -126,7 +127,7 @@ AGENT_TOOL_RESULT_MAX_CHARS=50000
 
 `AGENT_MAX_MUTATIONS` is a hard cap on calls that modify the world, inventory, or research state. Read-only inspection and ordinary walking do not consume it. `AGENT_MAX_FAILED_MUTATIONS` stops further mutations early when repeated build/mine/transfer attempts fail. Once either mutation budget is exhausted, the orchestrator exposes only read-only tools for the rest of the task so the model can verify state and report the blocker instead of thrashing.
 
-At the end of a cloud run the CLI prints metrics including elapsed time, model turns, tool calls, mutation calls, failed mutations, and API token usage when the provider returns usage data.
+At the end of a cloud run the CLI prints metrics including elapsed time, model turns, tool calls, mutation calls, failed mutations, plan-validation attempts/status, and API token usage when the provider returns usage data.
 
 ## 4. Install the orchestrator
 
@@ -143,6 +144,35 @@ factorio-ai "Inspect the existing factory, then increase green-circuit productio
 ```
 
 On startup the agent inspects a compact existing-save snapshot and can query further state on demand. It must not assume a fresh game. Mutation tasks are diagnosis-first: the system prompt instructs the model to establish the relevant state/plan before crafting, mining, placing, or transferring items.
+
+### Plan-gated factory expansion
+
+For substantial new production lines, use `--plan-gated`:
+
+```powershell
+factorio-ai --plan-gated "Extend the existing factory with an automated defense production hub. Reuse the main bus and established assembler district, validate the complete design, then build only after the plan passes validation."
+```
+
+In this mode the model initially receives only read-only/navigation tools plus the orchestrator-local `submit_factory_plan` tool. World-changing tools are not exposed until `submit_factory_plan` returns `PLAN_VALID`.
+
+A submitted plan is machine-checked against live Factorio state and recipe/prototype data. Validation currently checks:
+
+- actual recipe times, machine crafting speed, machine counts and target production rates;
+- required item rates against yellow/red/blue belt capacity and half-belt lane capacity;
+- source-to-sink belt segment continuity and direction;
+- claimed extension direction against an existing source belt when `source_mode=extend`;
+- planned entity footprint overlap;
+- live `surface.can_place_entity` feasibility without creating ghosts or entities;
+- inserter pickup/drop geometry through explicit `pickup_ref`/`drop_ref` references;
+- electric-pole supply coverage and connectivity back to a declared existing pole anchor.
+
+If validation returns `PLAN_INVALID`, mutating tools remain hidden and the model must correct the reported issues and resubmit. This mode is intended for large build/expansion tasks; small repairs can continue using the normal CLI path.
+
+To verify the patched read-only preflight tool after bootstrap:
+
+```powershell
+factorio-ai --list-tools | Select-String "survey_factory_layout|check_entity_placement_batch"
+```
 
 ## Cloudflare Worker
 
