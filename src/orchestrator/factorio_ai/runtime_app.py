@@ -45,14 +45,18 @@ from . import plan_execution_guard as plan_execution_guard  # noqa: E402,F401
 # an architectural feasibility invariant, not per-tile execution micromanagement.
 from . import power_reach_guard as power_reach_guard  # noqa: E402,F401
 
-# Exact additive placements can still be batched after PLAN_VALID and execution gets its
-# own turn allowance so planning cannot consume the complete runtime budget.
+# Additive placements can still be batched after PLAN_VALID and execution gets its own
+# turn allowance so planning cannot consume the complete runtime budget.
 from . import execution_batch_guard as execution_batch_guard  # noqa: E402,F401
 
 # PLAN_VALID is an architectural contract. Ordinary belt/underground geometry and small
 # pole shifts may adapt locally to live obstacles while sources, taps, destructive changes,
 # machines and inserter relationships stay protected.
 from . import architectural_execution_guard as architectural_execution_guard  # noqa: E402,F401
+
+# Long surface-belt runs are executed deterministically inside Python. Sol receives compact
+# completion/blocker facts and only reasons again when a real local obstacle needs a detour.
+from . import route_executor as route_executor  # noqa: E402,F401
 
 
 def main() -> None:
