@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable
 
 from . import app as base
 from . import resilient_app as resilient
-from .planning import BELT_CAPACITY_ITEMS_PER_SECOND, PLAN_TOOL_SCHEMA
+from .planning import PLAN_TOOL_SCHEMA
 
 
 CallMcp = Callable[[str, dict[str, Any]], Awaitable[str]]
@@ -59,7 +59,7 @@ def _install_schema_description() -> None:
         return
     field["description"] = (
         "Sustained design output rate for target_item. When set, the validator sizes input/output/fuel routes to this rate, "
-        "not to the machine block's theoretical maximum. machine_count only has to provide enough capacity."
+        "not to the machine block's theoretical maximum. machine_count must be the minimum whole-machine count that can meet it."
     )
 
 
@@ -144,12 +144,13 @@ async def _validate_factory_plan_design_throughput(
             per_machine = capacity_target_rate / machine_count
             minimum = max(1, int(math.ceil((target_rate - 1e-12) / per_machine)))
             if machine_count > minimum:
-                validation.setdefault("warnings", []).append(
+                validation.setdefault("issues", []).append(
                     {
-                        "code": "production_capacity_headroom",
+                        "code": "machine_count_exceeds_design_requirement",
                         "message": (
-                            f"Block {block_id} uses {machine_count} machines but only {minimum} are required for the declared "
-                            f"design rate {target_rate:.3f}/s. Do not expand upstream merely to feed theoretical maximum capacity."
+                            f"Block {block_id} declares {machine_count} machines, but only {minimum} are required for target_rate_per_second="
+                            f"{target_rate:.3f}. Use the minimum machine count or omit target_rate_per_second when deliberate full-capacity "
+                            "headroom is itself the design goal. Do not create upstream expansion just to feed idle theoretical capacity."
                         ),
                         "block_id": block_id,
                         "machine_count": machine_count,
@@ -166,7 +167,6 @@ async def _validate_factory_plan_design_throughput(
                 energy_usage = _number(prototype.get("energy_usage"))
                 effectivity = max(_number(prototype.get("burner_effectivity"), 1.0), 1e-9)
                 if machine_count > 0 and energy_usage > 0:
-                    # Full-load joules/tick. The route-specific fuel value is applied below.
                     block_fuel_full_rate[block_id] = machine_count * energy_usage * 60.0 / effectivity
 
     route_summaries = {
@@ -211,8 +211,6 @@ async def _validate_factory_plan_design_throughput(
             summary["required_rate_per_second"] = round(required, 6)
             summary["rate_basis"] = "target_rate_per_second"
 
-    # The legacy validator sizes belt capacity to 100% machine utilization. Replace only
-    # those capacity failures whose declared design throughput actually fits the route.
     filtered_issues: list[dict[str, Any]] = []
     for issue in validation.get("issues", []) or []:
         if not isinstance(issue, dict) or issue.get("code") != "belt_capacity_exceeded":
@@ -237,5 +235,5 @@ if _PROMPT_MARKER not in base.SYSTEM_PROMPT:
     base.SYSTEM_PROMPT += """
 
 DESIGN THROUGHPUT SEMANTICS:
-target_rate_per_second is the sustained design throughput, not an instruction to feed every machine at its theoretical maximum. Size ingredient, output and burner-fuel routes to the declared target rate while ensuring machine_count has enough capacity. Capacity headroom is allowed. Never expand an upstream mining/smelting district solely because a downstream machine could consume much faster than the requested rate. Before adding upstream machines, compare the target demand with the live capacity of the existing district.
+target_rate_per_second is the sustained design throughput, not an instruction to feed every machine at its theoretical maximum. Size ingredient, output and burner-fuel routes to the declared target rate. When a target rate is declared, use the minimum whole-machine count that can meet it; do not provision extra machines and then expand upstream merely to feed their idle theoretical capacity. Before adding upstream machines, compare the target demand with the live capacity of the existing district.
 """
