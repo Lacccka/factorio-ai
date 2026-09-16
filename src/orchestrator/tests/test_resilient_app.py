@@ -175,7 +175,7 @@ class ResilientResumeGateTests(unittest.IsolatedAsyncioTestCase):
                 response,
                 SimpleNamespace(),
                 metrics,
-                set(),
+                {"get_power_network_topology"},
                 True,
             )
 
@@ -209,12 +209,45 @@ class ResilientResumeGateTests(unittest.IsolatedAsyncioTestCase):
                 response,
                 SimpleNamespace(),
                 metrics,
-                set(),
+                {"survey_factory_layout"},
                 True,
             )
 
         self.assertEqual(len(outputs), 1)
         self.assertIn("RESUME_TOOL_BLOCKED", outputs[0]["output"])
+
+    async def test_unadvertised_tool_is_blocked_before_mcp_dispatch(self):
+        metrics = base.RunMetrics(started_at=0.0)
+        response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="execute_lua",
+                    call_id="hidden",
+                    arguments='{"code":"game.print(1)"}',
+                )
+            ]
+        )
+
+        async def should_not_execute(*args, **kwargs):
+            raise AssertionError("hidden tool must not reach MCP")
+
+        with patch(
+            "factorio_ai.resilient_app._PERSISTENT_EXECUTE_FUNCTION_CALLS",
+            should_not_execute,
+        ):
+            outputs = await _execute_function_calls_resilient(
+                None,
+                response,
+                SimpleNamespace(),
+                metrics,
+                {"get_player_position"},
+                False,
+            )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertTrue(outputs[0]["output"].startswith("TOOL_NOT_ALLOWED:"))
+        self.assertEqual(metrics.tool_calls, 1)
 
 
 if __name__ == "__main__":
