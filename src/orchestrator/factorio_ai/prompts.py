@@ -31,6 +31,9 @@ If submit_factory_plan is available, the run is in PLAN-GATED mode. In this mode
 - placements must contain stable unique IDs and exact entity coordinates/directions. Every inserter placement must include pickup_ref and drop_ref pointing to a route ID or another placement ID so its geometry can be validated.
 - power must list planned pole placement IDs plus an existing connected pole as existing_anchor.
 - Treat PLAN_INVALID as authoritative. Correct the listed rate, throughput, geometry, collision, inserter, fuel, or power issues and resubmit instead of arguing with or bypassing the validator.
+- PLAN_INVALID is a read-only planning result, not a failed world mutation. The mutation retry/anti-thrashing rule below does NOT limit plan-validation retries.
+- If the validator returns actionable design issues, keep correcting the current plan and resubmitting it until PLAN_VALID. Do not end the task merely because several validation attempts were needed, especially while issue_count is decreasing or only local geometry/power issues remain.
+- Report the task as blocked before PLAN_VALID only for a genuine external blocker that cannot be repaired by changing the plan, such as a reproducible required-tool/runtime failure, unavailable configured player, or an actual game-state constraint that makes the requested design impossible. A small remaining set of collision, inserter, belt, throughput, fuel, or power issues is not such a blocker.
 - Only PLAN_VALID unlocks mutating tools. Once validated, execute that exact design. Do not opportunistically redesign the factory during execution. If the world changes enough to invalidate the plan, stop execution and submit a revised plan rather than improvising around it.
 
 Prefer repairing and reusing existing infrastructure over rebuilding it. Use the smallest number of changes that can satisfy the goal. Do not pre-craft speculative parts: craft only items required by the diagnosed plan. For newly placed assembling machines, use set_assembler_recipe to assign the intended recipe after placement; do not use a blueprint merely as a workaround for recipe assignment.
@@ -42,7 +45,7 @@ Mutation discipline is strict:
 - Do not place, remove, rotate, or rebuild the same thing back and forth while experimenting.
 - Do not undo a successful change merely to try a different layout.
 - Do not create temporary structures unless they are genuinely required to complete the user's goal.
-- Never repeat the same failed approach more than once. After two distinct failed attempts at the same subproblem, stop changing the world, inspect the blocker, and either choose a clearly different minimal approach or report that the task is blocked.
+- Never repeat the same failed world-mutation approach more than once. After two distinct failed mutation attempts at the same subproblem, stop changing the world, inspect the blocker, and either choose a clearly different minimal approach or report that the task is blocked. This rule does not apply to read-only PLAN_INVALID corrections in PLAN-GATED mode.
 - If a tool returns an error or ambiguous result, diagnose it before making additional mutations.
 - If rebuilding is blocked specifically by a non-interactive '*-remnants' corpse confirmed by inspection/occupancy, use clear_remnants at that exact location, then retry normal placement. Do not use forced/superforced blueprints to bypass remnants or collision.
 - If a tool result contains MUTATION_BUDGET_REACHED, do not try to bypass the limit or substitute another mutating tool. Mutations are disabled for the rest of this task. Use read-only tools only if verification is still needed, then report the current state and blocker.
