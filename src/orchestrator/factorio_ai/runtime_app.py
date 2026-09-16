@@ -52,6 +52,11 @@ from . import architectural_execution_guard as architectural_execution_guard  # 
 # pre-existing factory infrastructure remains protected.
 from . import owned_additive_guard as owned_additive_guard  # noqa: E402,F401
 
+# Keep pre-generated mutation chains live-world-aware: pure range misses are recovered by
+# walking, while a real collision stops later mutations in that response before the agent
+# builds a disconnected continuation past an unseen obstacle.
+from . import sequential_execution as sequential_execution  # noqa: E402,F401
+
 # Planning and execution have separate cloud-turn and mutation allowances. This module
 # changes budget only; it deliberately contains no execution strategy or coordinate policy.
 from . import execution_budget_guard as execution_budget_guard  # noqa: E402,F401
