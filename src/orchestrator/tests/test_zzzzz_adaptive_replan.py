@@ -146,6 +146,48 @@ class AdaptiveReplanTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(result["valid"], result)
 
+    def test_route_tile_expansion_skips_planned_underground_span(self):
+        plan = {
+            "material_routes": [
+                {
+                    "id": "coal-feed",
+                    "belt": "transport-belt",
+                    "source_mode": "new",
+                    "source": {"x": 20.5, "y": -192.5},
+                    "sink": {"x": 28.5, "y": -192.5},
+                    "segments": [
+                        {
+                            "from": {"x": 20.5, "y": -192.5},
+                            "to": {"x": 28.5, "y": -192.5},
+                            "direction": "east",
+                        }
+                    ],
+                }
+            ],
+            "placements": [
+                {
+                    "id": "ug-in",
+                    "entity_name": "underground-belt",
+                    "x": 22.5,
+                    "y": -192.5,
+                    "direction": "east",
+                },
+                {
+                    "id": "ug-out",
+                    "entity_name": "underground-belt",
+                    "x": 26.5,
+                    "y": -192.5,
+                    "direction": "east",
+                },
+            ],
+        }
+        points = {(tile["x"], tile["y"]) for tile in route_guard._route_tiles(plan)}
+        self.assertIn((21.5, -192.5), points)
+        self.assertNotIn((23.5, -192.5), points)
+        self.assertNotIn((24.5, -192.5), points)
+        self.assertNotIn((25.5, -192.5), points)
+        self.assertIn((27.5, -192.5), points)
+
     async def test_invalid_position_revokes_plan_and_enters_local_repair(self):
         metrics = base.RunMetrics(started_at=time.perf_counter())
         metrics.plan_validated = True
