@@ -32,6 +32,11 @@ world_model._TOOL_SECTIONS.update(
 # make the model redundantly submit an unchanged PLAN_VALID checkpoint again.
 from . import checkpoint_policy as checkpoint_policy  # noqa: E402,F401
 
+# Rate semantics must be installed before the structural plan wrapper captures the base
+# validator. target_rate_per_second is sustained design throughput, while machine maximum
+# speed is only capacity headroom.
+from . import throughput_semantics as throughput_semantics  # noqa: E402,F401
+
 # Structural safety remains strict: destructive removals and source-trunk splitter taps
 # must be explicit and geometrically safe.
 from . import plan_execution_guard as plan_execution_guard  # noqa: E402,F401
@@ -47,8 +52,8 @@ from . import architectural_execution_guard as architectural_execution_guard  # 
 # pre-existing factory infrastructure remains protected.
 from . import owned_additive_guard as owned_additive_guard  # noqa: E402,F401
 
-# Planning and execution have separate cloud-turn allowances. This module changes budget
-# only; it deliberately contains no execution strategy or coordinate-level policy.
+# Planning and execution have separate cloud-turn and mutation allowances. This module
+# changes budget only; it deliberately contains no execution strategy or coordinate policy.
 from . import execution_budget_guard as execution_budget_guard  # noqa: E402,F401
 
 
