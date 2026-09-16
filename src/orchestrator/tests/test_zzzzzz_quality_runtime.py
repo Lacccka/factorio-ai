@@ -100,6 +100,44 @@ class QualityRuntimeTests(unittest.TestCase):
         self.assertIn("do not submit the unchanged plan again", text)
         self.assertIn("waypoints, not immutable commands", text)
 
+    def test_checkpoint_does_not_resume_previous_process_mutation_budget_exhaustion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PersistentRunState(Path(tmp), "player", "goal")
+            store.save_plan_checkpoint(
+                9,
+                self._plan(),
+                {
+                    "valid": True,
+                    "status": "PLAN_VALID",
+                    "issue_count": 0,
+                    "warning_count": 0,
+                    "issues": [],
+                    "warnings": [],
+                },
+            )
+            store.record_plan_execution_step(
+                "place_entity",
+                {"entityName": "transport-belt", "x": -18.5, "y": -290.5, "direction": "west"},
+                '{"success":false,"error":"invalid_position"}\n\nMUTATION_BUDGET_REACHED: mutation call limit reached (80/80).',
+                True,
+            )
+            store.mark_run_finished(
+                "Execution stopped because MUTATION_BUDGET_REACHED (80/80). Further mutations are forbidden."
+            )
+            text, checkpoint = store.plan_checkpoint_context()
+
+        self.assertIsNotNone(checkpoint)
+        assert checkpoint is not None
+        self.assertNotIn("last_run_final_text", checkpoint)
+        execution = checkpoint.get("execution")
+        self.assertIsInstance(execution, dict)
+        assert isinstance(execution, dict)
+        self.assertNotIn("mutation_count", execution)
+        self.assertEqual(execution.get("historical_mutation_count"), 1)
+        self.assertNotIn("MUTATION_BUDGET_REACHED (80/80)", text)
+        self.assertIn("previous run ending with MUTATION_BUDGET_REACHED is historical information", text)
+        self.assertNotIn("Further mutations are forbidden", text)
+
     def test_recent_ai_owned_belt_can_be_recognized_for_correction(self):
         metrics = base.RunMetrics(started_at=time.perf_counter())
         with tempfile.TemporaryDirectory() as tmp:
