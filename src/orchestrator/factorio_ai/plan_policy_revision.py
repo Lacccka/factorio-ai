@@ -68,7 +68,9 @@ async def _revalidate_checkpoint_policy_aware(
                     "warning_count": 0,
                     "issues": [
                         {
-                            "code": "planning_policy_revision_changed",
+                            # Include "rate" in the issue code so resume phase exposes the
+                            # narrow recipe/rate tools needed to repair this policy change.
+                            "code": "planning_rate_policy_revision_changed",
                             "message": (
                                 "The stored plan predates the current quality policy. Re-evaluate architecture before execution. "
                                 "In particular, when the user did not request a numeric throughput, do not choose a downstream "
