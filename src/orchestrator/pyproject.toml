@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-factorio-ai = "factorio_ai.resilient_app:main"
+factorio-ai = "factorio_ai.optimized_app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
