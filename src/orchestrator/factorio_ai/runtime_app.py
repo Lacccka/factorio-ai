@@ -7,13 +7,8 @@ from . import app as base
 from . import world_model as world_model
 
 
-# A developed Factorio base spans several production/resource districts. The original
-# semantic-memory limits were tuned for local tasks and retained too few survey regions,
-# so later planning could incorrectly infer that an upstream source did not exist simply
-# because its sector had fallen out of the tiny working set.
-#
-# Keep more regional facts on disk while still bounding the prompt. Four entries per
-# section are enough to expose a compact cross-base atlas without returning to raw scans.
+# A developed Factorio base spans several production/resource districts. Keep enough
+# compact semantic memory to reuse an atlas without pushing raw surveys into every turn.
 world_model.MAX_SECTION_ENTRIES = max(world_model.MAX_SECTION_ENTRIES, 16)
 world_model.MAX_CONTEXT_ENTRIES_PER_SECTION = max(
     world_model.MAX_CONTEXT_ENTRIES_PER_SECTION,
@@ -21,10 +16,6 @@ world_model.MAX_CONTEXT_ENTRIES_PER_SECTION = max(
 )
 world_model.MAX_CONTEXT_CHARS = max(world_model.MAX_CONTEXT_CHARS, 28_000)
 
-# Whole-base surveys learn important facts through targeted tools after broad regional
-# scans. Persist those results into the same durable semantic sections so a later goal
-# does not lose facts such as an off-bus stone-brick source merely because the recipe was
-# confirmed by trace_item_flow rather than survey_factory_layout.
 world_model._TOOL_SECTIONS.update(
     {
         "trace_item_flow": ("architecture", {"logistics", "production"}),
@@ -37,26 +28,28 @@ world_model._TOOL_SECTIONS.update(
     }
 )
 
-# Keep strict validation for dangerous/structural operations: destructive removals and
-# two-tile splitter taps into existing trunks must be explicit and geometrically safe.
+# Resume semantics: the orchestrator itself freshly revalidates a persisted plan. Do not
+# make the model redundantly submit an unchanged PLAN_VALID checkpoint again.
+from . import checkpoint_policy as checkpoint_policy  # noqa: E402,F401
+
+# Structural safety remains strict: destructive removals and source-trunk splitter taps
+# must be explicit and geometrically safe.
 from . import plan_execution_guard as plan_execution_guard  # noqa: E402,F401
 
-# Validate mixed pole chains using Factorio's actual shorter-end wire reach. This remains
-# an architectural feasibility invariant, not per-tile execution micromanagement.
+# Mixed electric-pole chains must obey the shorter pole's real copper-wire reach.
 from . import power_reach_guard as power_reach_guard  # noqa: E402,F401
 
-# Additive placements can still be batched after PLAN_VALID and execution gets its own
-# turn allowance so planning cannot consume the complete runtime budget.
-from . import execution_batch_guard as execution_batch_guard  # noqa: E402,F401
-
-# PLAN_VALID is an architectural contract. Ordinary belt/underground geometry and small
-# pole shifts may adapt locally to live obstacles while sources, taps, destructive changes,
-# machines and inserter relationships stay protected.
+# Ordinary logistics are reasoning-led. Sol may choose local belt/underground/pole geometry
+# inside the validated work area instead of replaying an exact stale route polyline.
 from . import architectural_execution_guard as architectural_execution_guard  # noqa: E402,F401
 
-# Long surface-belt runs are executed deterministically inside Python. Sol receives compact
-# completion/blocker facts and only reasons again when a real local obstacle needs a detour.
-from . import route_executor as route_executor  # noqa: E402,F401
+# Let the agent safely correct only additive entities that it previously placed itself;
+# pre-existing factory infrastructure remains protected.
+from . import owned_additive_guard as owned_additive_guard  # noqa: E402,F401
+
+# Planning and execution have separate cloud-turn allowances. This module changes budget
+# only; it deliberately contains no execution strategy or coordinate-level policy.
+from . import execution_budget_guard as execution_budget_guard  # noqa: E402,F401
 
 
 def main() -> None:
